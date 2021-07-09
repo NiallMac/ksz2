@@ -1,0 +1,64 @@
+prepare_map:
+    ksz_reion_alms: "tests/alms_4e3_2048_50_50_ksz.fits"
+    websky_directory: "/global/cscratch1/sd/maccrann/cmb/"
+    websky_version: "websky"
+    do_tsz: False
+    do_cib: False
+    do_ksz: False #low redshift ksz
+    noise_sigma: 10.
+    noise_seed: iNone
+    beam_fwhm: 1.
+    res: 1.
+    freqs:
+      - "0093"
+      - "0145"
+    mlmax: 6000
+    #halo masking
+    halo_mask_fgs: False
+    log10_m_min: 15.
+    zmax: 4.
+    mask_radius: 10.
+    num_halo: iNone
+
+    #cib flux cut
+    cib_flux_cut: fNone
+
+    #Set to true to not add
+    #noise to maps
+    disable_noise: True
+
+reconstruction:
+    K_lmin: 3000
+    K_lmax: 6000
+    tag: '0'
+    freqs: lsNone
+    mlmax: null
+    cmb_seeds: liNone
+    cmb_seed_start: iNone
+    cmb_seed_end: iNone
+    #profile_file: sNone #file with profile
+    do_qe: True
+    do_lh2: False
+
+bias:
+    do_n0: True
+    nsim_n0: 40
+    do_n1: False
+    nsims_n1: 40
+    recon_tag: '0'
+    tag: '0'
+    kappa_lmin: iNone
+    kappa_lmax: iNone
+    cmb_seeds: liNone
+    cmb_seed_start: iNone
+    cmb_seed_end: iNone
+    skip_existing: False
+    do_qe: True
+    do_lh: True
+    do_lh2: False
+    do_unlensed: True
+    sim_start: 0
+    freqs: lsNone
+    add_gaussian_fg: False
+    skip_tags: lsNone
+    grad: False
