@@ -15,9 +15,8 @@ from os.path import join as opj
 import argparse
 import yaml
 from collections import OrderedDict
-from prepare_maps import safe_mkdir, get_disable_mpi
+from cmbsky import safe_mkdir, get_disable_mpi
 from orphics import maps
-from websky_model import WebSky
 from copy import deepcopy
 import sys
 from scipy.signal import savgol_filter
@@ -128,20 +127,67 @@ def white_noise(shape,wcs,noise_muK_arcmin,seed):
 
 from do_reconstruction import setup_recon
 
-def get_alm_files(config, map_dir, freq,
-                  get_masked=False, get_modelsub=False):
-    alm_files = OrderedDict([])
-    alm_files["cmb"] = opj(map_dir,"cmb_alms.fits")
-    alm_files["cmb"] = opj(map_dir,"cmb_unlensed.fits")
-    alm_files["fg"] = opj(map_dir,"fg_raw_alms_%s.fits"%freq)
-    if get_masked:
-        alm_files["fg_masked"] = opj(
-            map_dir,"fg_masked_raw_alms_%s.fits"%freq)
-    if get_modelsub:
-        alm_files["fg_modelsub"] = opj(
-            map_dir, "fg_modelsub_raw_alms_%s.fits"%freq)
-    return alm_files
 
+def trispectrum_N0_qe(cl_total, cl_fg, norm_s,
+                      ucls, K_lmin, K_lmax, mlmax,
+                      profile):
+    
+    Ctot = cl_total**2/cl_fg
+    norm_fg = pytempura.get_norms(
+        ['src'], ucls, {'TT' : Ctot},
+        K_lmin, K_lmax, k_ellmax=mlmax,
+        profile=profile)['src']
+    
+    L = np.arange(mlmax+1)
+    N0_tri = norm_s**2 / norm_fg / profile**2
+    return N0_tri
+
+def trispectrum_N0_lh(cl_total, cl_fg, norm_s,
+                      ucls, K_lmin, K_lmax, mlmax,
+                      profile, norm_lens, R_s_lens):
+    
+    Ctot = cl_total**2/cl_fg
+    norm_lens_fg = pytempura.norm_lens.qtt(
+        mlmax, K_lmin, K_lmax, cl_total,
+        Ctot, gtype='')[0]
+    R_s_lens_fg = pytempura.get_cross(
+        'SRC','TT', ucls, {"TT" : Ctot},
+        K_lmin, K_lmax, k_ellmax = mlmax,
+        profile = profile)
+
+    N0 = norm_s**2/norm_fg
+    N0_lens = norm_lens**2 / norm_lens_fg
+    N0_tri = (N0 + R_s_lens**2 * norm_s**2 * N0_lens
+              - 2 * R_s_lens * norm_s**2 * norm_lens * R_s_lens_fg)
+    N0_tri /= (1 - norm_s*norm_lens*R_s_lens**2)**2
+    N0_tri /= profile**2
+    return N0_tri
+
+def trispectrum_N0_psh(cl_total, cl_fg, norm_s,
+                      ucls, K_lmin, K_lmax, mlmax,
+                       profile, norm_ps, R_s_ps):
+    norm_ps = recon_stuff["norm_ps"]
+    R_s_ps = recon_stuff["R_s_ps"]
+    norm_ps_fg = pytempura.get_norms(
+        ['src'], recon_stuff['ucls'], {'TT':Ctot},
+        K_lmin, K_lmax,
+        k_ellmax=mlmax)['src']
+    R_s_ps_fg = (1./pytempura.get_norms(
+        ['src'], recon_stuff['ucls'], {'TT':Ctot},
+        K_lmin, K_lmax, k_ellmax=mlmax,
+        profile = profile**0.5)['src'])
+    R_s_ps_fg[0] = 0.
+
+    N0 = norm_s**2/norm_fg
+    N0_ps = norm_ps**2 / norm_ps_fg
+    N0_tri = (N0 + R_s_ps**2 * norm_s**2 * N0_ps
+              - 2 * R_s_ps * norm_s**2 * norm_ps * R_s_ps_fg)
+    N0_tri /= (1 - norm_s*norm_ps*R_s_ps**2)**2
+    N0_tri /= profile**2
+    return N0_tri
+    
+
+    
 def main():
 
     args = get_config()
@@ -157,9 +203,18 @@ def main():
     #get config from prep map stage
     with open(opj(args.output_dir, 'prep_map', 'prepare_map_config.yml'),'r') as f:
         prep_map_config = yaml.load(f)
+
+    if recon_config['mlmax'] is None:
+        recon_config['mlmax'] = prep_map_config["lmax_out"]
+    if recon_config['freqs'] is None:
+        recon_config['freqs'] = prep_map_config['freqs']
+
+    """
     has_masked = ((prep_map_config["halo_mask_fgs"])
                   or (prep_map_config["cib_flux_cut"] is not None))
     has_modelsub = (prep_map_config["fg_model_alms"] is not None)
+    """
+    has_masked, has_modelsub = False,False
         
     if rank==0:
         print("has_masked:",has_masked)
@@ -167,10 +222,10 @@ def main():
     map_dir = opj(args.output_dir, "prep_map")
 
     #make output subdirectory for reconstruction stuff
-    out_dir = opj(args.output_dir, "fg_terms_%s"%args.tag)
+    out_dir = opj(args.output_dir, "ksz2_fg_terms_%s"%args.tag)
     safe_mkdir(out_dir)
     if recon_config['mlmax'] is None:
-        recon_config['mlmax'] = prep_map_config["mlmax"]
+        recon_config['mlmax'] = prep_map_config["lmax_out"]
     if recon_config['freqs'] is None:
         recon_config['freqs'] = prep_map_config['freqs']
     #save args to output dir
@@ -179,13 +234,13 @@ def main():
         with open(arg_file,'w') as f:
             yaml.dump(recon_config, f)
     
-    print("doing setup")
+    #print("doing setup")
     #shape, wcs, norm_stuff, ucls, tcls, filter_alms, qfunc, qfunc_bh, _ = setup_recon(
     #   prep_map_config, recon_config)
-    recon_stuff = setup_recon(
-        prep_map_config, recon_config)
-    filter_alms = recon_stuff['filter_alms']
-    profile = recon_stuff['profile']
+    #recon_stuff = setup_recon(
+    #    prep_map_config, recon_config)
+    #filter_alms = recon_stuff['filter_alms']
+    #profile = recon_stuff['profile']
 
     #Get kappa alms
     print("reading kappa alms")
@@ -205,39 +260,16 @@ def main():
     #convert to phi
     Ls = np.arange(recon_config['mlmax']+1)
     phi_alms = curvedsky.almxfl(kappa_alms, 1/(Ls*(Ls+1)/2))
-    print(recon_stuff["norm_s"])
-    deltas_phi = curvedsky.almxfl(
-            phi_alms, recon_stuff["norm_s"] * recon_stuff["R_s_tt"]
-        )
-    deltaK_phi = curvedsky.almxfl(
-        deltas_phi, 1./profile)
-
-    if not args.normalized:
-        deltaK_phi = curvedsky.almxfl(
-            deltaK_phi, 1./recon_stuff["norm_K"]
-            )
-    cl_phiphi = curvedsky.alm2cl(deltaK_phi)
     
     """
     #cl_kk = curvedsky.alm2cl(kappa_alms)
     #print("cl_kk.shape:",cl_kk.shape)
     """
 
-    if args.freqs is None:
-        args.freqs = prep_map_config['freqs']
 
-    if args.normalized:
-        qfuncs = [("qe",recon_stuff['qfunc_normed']),
-                  ("psh",recon_stuff['qfunc_psh_normed'])]
-        if args.do_lh:
-            qfuncs.append(("lh", recon_stuff["qfunc_lh_normed"]))
-    else:
-        qfuncs = [("qe",recon_stuff['qfunc_sf']),
-                  ("psh",recon_stuff['qfunc_psh_sf'])]
-        if args.do_lh:
-            qfuncs.append(("lh", recon_stuff["qfunc_lh_sf"]))
-
+            
     for freq in args.freqs:
+        print("freq: %s"%freq)
         #Read alms for reconstruction
         if recon_config["sim_name"]=="websky":
             if recon_config["cmb_name"] is None:
@@ -245,48 +277,78 @@ def main():
         else:
             if recon_config["cmb_name"] is None:
                 recon_config['cmb_name']="cmb_orig"
+        if args.use_cltot_file:
+            f = opj(map_dir, recon_config["cmb_name"],
+                    "Cltot_data.npy")
+            print("using Cl^tot from %s"%f)
+            cltot_data = np.load(f)
+        else:
+            cltot_data = None
+
+        if cltot_data is not None:
+            print(cltot_data.dtype.names)
+            if freq in cltot_data.dtype.names:
+                recon_config["Cl_tot"] = cltot_data[freq]
+            else:
+                print("no Cl_tot for freq %s, will use other options"%freq)
+                recon_config["Cl_tot"] = None
+
+        recon_stuff = setup_recon(
+            prep_map_config, recon_config)
+        filter_alms = recon_stuff['filter_alms']
+        profile = recon_stuff['profile']
+
+        if args.freqs is None:
+            args.freqs = prep_map_config['freqs']
+
+        if args.normalized:
+            qfuncs = [("qe",recon_stuff['qfunc_normed']),
+                      ("psh",recon_stuff['qfunc_psh_normed'])]
+            if args.do_lh:
+                qfuncs.append(("lh", recon_stuff["qfunc_lh_normed"]))
+        else:
+            qfuncs = [("qe",recon_stuff['qfunc_sf']),
+                      ("psh",recon_stuff['qfunc_psh_sf'])]
+            if args.do_lh:
+                qfuncs.append(("lh", recon_stuff["qfunc_lh_sf"]))
+        
+        print(recon_stuff["norm_s"])
+        deltas_phi = curvedsky.almxfl(
+                phi_alms, recon_stuff["norm_s"] * recon_stuff["R_s_tt"]
+            )
+        deltaK_phi = curvedsky.almxfl(
+            deltas_phi, 1./profile)
+
+        if not args.normalized:
+            deltaK_phi = curvedsky.almxfl(
+                deltaK_phi, 1./recon_stuff["norm_K"]
+                )
+        cl_phiphi = curvedsky.alm2cl(deltaK_phi)
+
+        
         cmb_name = recon_config['cmb_name']
-        alm_files = get_alm_files(prep_map_config, opj(map_dir, cmb_name),
-                                  freq, get_masked=has_masked)
         outputs = OrderedDict()
         outputs['cl_KphiKphi'] = cl_phiphi
         #outputs['cl_kk'] = cl_kk
 
+        for key in ["N0_K_normed", "N0_K_nonorm",
+                    "N0_K_lh_normed", "N0_K_lh_normed",
+                    "N0_K_psh_normed", "N0_K_psh_nonorm"]:
+            outputs[key] = recon_stuff[key]
+        
         fg_alms = hp.fitsfunc.read_alm(opj(map_dir, cmb_name,
-                                       "fg_raw_alms_%s.fits"%freq))
+                                       "fg_nonoise_alms_%s.fits"%freq))
         fg_alms = utils.change_alm_lmax(fg_alms, recon_config['mlmax'])
         cl_fg = get_cl_fg_smooth(fg_alms)
         fg_alms_filtered = recon_stuff['filter_alms'](fg_alms)
-
-        mask_options = OrderedDict()
-        mask_options[""] = (fg_alms_filtered, cl_fg)
-        if has_masked:
-            fg_masked_alms = hp.fitsfunc.read_alm(opj(map_dir, cmb_name,
-                                       "fg_masked_raw_alms_%s.fits"%freq))
-            fg_masked_alms = utils.change_alm_lmax(fg_masked_alms,
-                                                   recon_config['mlmax'])
-            cl_fg_masked = get_cl_fg_smooth(fg_masked_alms)
-            fg_masked_alms_filtered = recon_stuff['filter_alms'](fg_masked_alms)
-            mask_options["masked"] = (fg_masked_alms_filtered, cl_fg_masked)
-
-        if has_modelsub:
-            fg_modelsub_alms = hp.fitsfunc.read_alm(opj(map_dir, cmb_name,
-                                       "fg_modelsub_raw_alms_%s.fits"%freq))
-            fg_modelsub_alms = utils.change_alm_lmax(fg_modelsub_alms,
-                                                   recon_config['mlmax'])
-            cl_fg_modelsub = get_cl_fg_smooth(fg_modelsub_alms)
-            fg_modelsub_alms_filtered = recon_stuff['filter_alms'](fg_modelsub_alms)
-            mask_options["modelsub"] = (fg_modelsub_alms_filtered, cl_fg_modelsub)
-            
 
         K_lmin,K_lmax,mlmax = (recon_config['K_lmin'],
                                        recon_config['K_lmax'],
                                        recon_config['mlmax'])
 
         jobs = []
-        for mask_tag, (fg_alm_filt_use, cl_fg_use) in mask_options.items():
-            for (estimator_name, qfunc) in qfuncs:
-                jobs.append((mask_tag, fg_alm_filt_use, cl_fg_use, estimator_name, qfunc))
+        for (estimator_name, qfunc) in qfuncs:
+                jobs.append((fg_alms_filtered, cl_fg, estimator_name, qfunc))
         njobs = len(jobs)
         print("%d jobs"%len(jobs))
 
@@ -295,12 +357,10 @@ def main():
                 continue
             if i%size != rank:
                 continue
-            mask_tag, fg_alm_filt_use, cl_fg_use, estimator_name, qfunc = job
+            fg_alm_filt_use, cl_fg_use, estimator_name, qfunc = job
                 
             label = estimator_name
-            if mask_tag != "":
-                label = mask_tag+"_"+label
-            print("mask_tag: %s, estimator: %s"%(mask_tag,estimator_name))
+            print("estimator: %s"%(estimator_name))
             s_fg_fg = qfunc(fg_alm_filt_use, fg_alm_filt_use)
 
             #Do trispectrum
@@ -340,7 +400,7 @@ def main():
                 norm_ps = recon_stuff["norm_ps"]
                 R_s_ps = recon_stuff["R_s_ps"]
                 norm_ps_fg = pytempura.get_norms(
-                    ['TT','src'], recon_stuff['ucls'], {'TT':Ctot},
+                    ['src'], recon_stuff['ucls'], {'TT':Ctot},
                     K_lmin, K_lmax,
                     k_ellmax=mlmax)['src']
                 R_s_ps_fg = (1./pytempura.get_norms(

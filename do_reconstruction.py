@@ -15,7 +15,7 @@ from os.path import join as opj
 import argparse
 import yaml
 from collections import OrderedDict
-from prepare_maps import safe_mkdir, get_disable_mpi, DEFAULTS, get_cmb_alm_unlensed, get_cmb_seeds
+from cmbsky import safe_mkdir, get_disable_mpi, DEFAULTS, get_cmb_alm_unlensed, get_cmb_seeds
 from orphics import maps
 from websky_model import WebSky
 from copy import deepcopy
@@ -124,28 +124,18 @@ def white_noise(shape,wcs,noise_muK_arcmin,seed):
 def setup_recon(prep_map_config, recon_config,
                 sim_start_ind=0):
     
-    mlmax = prep_map_config['mlmax']
+    mlmax = recon_config['mlmax']
     lmin,lmax = recon_config['K_lmin'], recon_config['K_lmax']
-    noise_sigma = prep_map_config["noise_sigma"]
-    if recon_config["noise_sigma"] is not None:
-        if not np.isclose(recon_config["noise_sigma"],noise_sigma):
-            try:
-                assert prep_map_config["disable_noise"]
-            except AssertionError as e:
-                ("""Noise level in maps is %f but you've                                                                                                 
-requested a noise level of %f in the reconstruction""")
-                raise(e)
-        noise_sigma = recon_config["noise_sigma"]
+    filter_noise_sigma = recon_config["noise_sigma"]
+
     res = prep_map_config["res"]*putils.arcmin
-    beam_fwhm = prep_map_config["beam_fwhm"]
-    beam_fn = lambda x: maps.gauss_beam(x, beam_fwhm)
-    unbeam_fn = lambda x: 1./maps.gauss_beam(x, beam_fwhm)
+    filter_beam_fwhm = recon_config["beam_fwhm"]
 
     ells = np.arange(mlmax+1)
-    bfact = maps.gauss_beam(beam_fwhm,ells)**2.
+    bfact = maps.gauss_beam(ells, filter_beam_fwhm)**2.
     shape,wcs = enmap.fullsky_geometry(res=res,
                                      proj='car')    
-    Nl_tt = (noise_sigma*np.pi/180./60.)**2./bfact
+    Nl_tt = (filter_noise_sigma*np.pi/180./60.)**2./bfact
     nells = {"TT":Nl_tt, "EE":2*Nl_tt, "BB":2*Nl_tt}
 
     #At present, if we haven't added noise, we never
@@ -159,14 +149,23 @@ requested a noise level of %f in the reconstruction""")
     #CMB theory for filters
     ucls,tcls = utils.get_theory_dicts(grad=True,
                                        nells=nells, lmax=mlmax)
+
+    
     cl_total_cmb = (tcls['TT']).copy()
     if prep_map_config['disable_noise']:
         cl_total_cmb -= nells['TT']
 
+    #It may be that we want to use a filter from
+    #file
+    if "Cl_tot" in recon_config:
+        if recon_config["Cl_tot"] is not None:
+            print("using Cl_tot from file")
+            tcls["TT"] = recon_config["Cl_tot"]
+        
     #And ksz2 filter
     #Read alms and get (smooth) Cl for filter
     #and rdn0
-    alm_file = prep_map_config['ksz_reion_alms']
+    alm_file = recon_config['ksz_reion_alms']
     alms=hp.fitsfunc.read_alm(alm_file)
     alm_lmax=hp.Alm.getlmax(len(alms))
     if alm_lmax>mlmax:
@@ -180,12 +179,11 @@ requested a noise level of %f in the reconstruction""")
     d = ells*(ells+1)*cl
     d_smooth = savgol_filter(d, 101, 3)
     cl_smooth = d_smooth/ells/(ells+1)
-    cl_smooth[0]=0.
-
-    tcls['TT'][:len(cl_smooth)] += cl_smooth
+    cl_smooth[0]=cl_smooth[1]
+    
+    #tcls['TT'][:len(cl_smooth)] += cl_smooth
     cl_total = tcls['TT']
-
-
+    
     #Get qfunc and normalization
     #profile is Cl**0.5
     profile = cl_smooth**0.5
@@ -202,20 +200,31 @@ requested a noise level of %f in the reconstruction""")
     N0_K_normed = norm_K
     #otherwise, it is
     N0_K_nonorm = 1./norm_K
-    
+
+    print('getting point-source norm')
+    print(tcls['TT'])
+    print(np.any(tcls['TT']==0.))
+    print(np.any(~np.isfinite(tcls['TT'])))
     norm_ps = pytempura.get_norms(
         ['src'], ucls, tcls,
         lmin, lmax, k_ellmax=mlmax)['src']
 
     #Also get lensing norms and cross-response for
     #lensing hardening
+    print('getting lensing norm')
     norm_lens = pytempura.norm_lens.qtt(
-        mlmax,lmin,lmax,ucls['TT'],tcls['TT'],gtype='')[0]
+        mlmax,lmin,lmax,ucls['TT'],
+        tcls['TT'],gtype='')[0]
+    
+    print('getting source-lens response')
+    print(tcls['TT'])
+    print(profile)
     R_s_tt = pytempura.get_cross(
         'SRC','TT', ucls, tcls,
         lmin, lmax, k_ellmax=mlmax,
         profile=profile)
 
+    print('getting source-point-source response')
     R_s_ps = (1./pytempura.get_norms(
         ['src'], ucls, tcls,
         lmin, lmax, k_ellmax=mlmax,
