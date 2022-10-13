@@ -160,8 +160,8 @@ def setup_recon(px, lmin, lmax, mlmax,
                 K_nonorm, norm_K
                 )
         outputs["qfunc_K"] = qfunc_K
-        qfunc_K_incfilter = lambda X,Y: qfunc_K(filter_alms_X(X),
-                                                filter_alms_X(Y))
+        qfunc_K_incfilter = lambda X,Y: qfunc_K(filter_alms_X(X)[0],
+                                                filter_alms_X(Y)[0])
         outputs["qfunc_K_incfilter"] = qfunc_K_incfilter
 
         def get_fg_trispectrum_K_N0(cl_fg):
@@ -194,16 +194,13 @@ def setup_recon(px, lmin, lmax, mlmax,
             # So bias-hardened K_BH given by
             # K_BH = (K_est - A^K R^K\phi \phi_est) / (1 - A^K*A^\phi*(R^K\phi)^2)
             K = qfunc_K(X,Y)
-            #s = curvedsky.almxfl(qfunc_prof(X,Y), norm_prof)
             phi = qfunc_phi(X,Y)
-            #phi = curvedsky.almxfl(
-            #    qfunc_lens_nonorm(X,Y)[0], norm_lens) #0th element is gradient
             num = K - curvedsky.almxfl(
                 phi, norm_K * R_K_phi)
             denom = 1 - norm_K * norm_phi * R_K_phi**2
-            s_normed_lh = curvedsky.almxfl(num, 1./denom)
-            K_normed_lh = curvedsky.almxfl(s_normed_lh, 1./profile)
+            K_normed_lh = curvedsky.almxfl(num, 1./denom)
             return K_normed_lh
+
         outputs["qfunc_K_lh"] = qfunc_lh
         qfunc_lh_incfilter = lambda X,Y: qfunc_lh(filter_alms_X(X),
                                                   filter_alms_X(Y))
@@ -230,7 +227,7 @@ def setup_recon(px, lmin, lmax, mlmax,
             N0_phi = norm_phi**2/norm_phi_fg
             N0_tri = (N0 + R_K_phi**2 * norm_K**2 * N0_phi
                       - 2 * R_K_phi * norm_K**2 * norm_phi * R_K_phi_fg)
-            N0_tri /= (1 - norm_K*norm_phi*R_K_phi**2)**2
+            N0_tri /= (1 - norm_K*norm_phi*R_K_phi**2)**2 
             return N0_tri
         outputs["get_fg_trispectrum_K_N0_lh"] = get_fg_trispectrum_K_N0_lh
         
@@ -239,16 +236,21 @@ def setup_recon(px, lmin, lmax, mlmax,
                                 fTalm=Y,xfTalm=X)
         def qfunc_ps(X,Y):
             ps = qfunc_ps_nonorm(X, Y)
-            return qfunc_ps(ps, norm_ps)
+            return curvedsky.almxfl(ps, norm_ps)
         outputs["qfunc_ps"] = qfunc_ps
 
         def qfunc_psh(X,Y):
+            #(K_est  )  = ( 1       A^K R^K\phi )(K   )
+            #(\phi_est)    ( A^\phi R^K\phi    1 )(\phi)
+            # So bias-hardened K_BH given by
+            # K_BH = (K_est - A^K R^K\phi \phi_est) / (1 - A^K*A^\phi*(R^K\phi)^2)
             K = qfunc_K(X,Y)
             ps = qfunc_ps(X,Y)
-            num = K - curvedsky.almxfl(ps, norm_K*R_K_phi)
-            denom = 1 - norm_K * norm_phi * R_K_phi
+            num = K - curvedsky.almxfl(ps, norm_K*R_K_ps)
+            denom = 1 - norm_K * norm_ps * R_K_ps**2
             K_psh = curvedsky.almxfl(num, 1./denom)
             return K_psh
+        
         outputs["qfunc_K_psh"] = qfunc_psh
         qfunc_psh_incfilter = lambda X,Y: qfunc_psh(filter_alms_X(X),
                                                   filter_alms_X(Y))
@@ -267,7 +269,8 @@ def setup_recon(px, lmin, lmax, mlmax,
             norm_ps_fg = pytempura.get_norms(
                 ['src'], ucls, {'TT':Ctot},
                 lmin, lmax,
-                k_ellmax=mlmax)['src'][0]
+                k_ellmax=mlmax)['src']
+            print("norm_ps_fg.shape:",norm_ps_fg.shape)
             R_K_ps_fg = (1./pytempura.get_norms(
                 ['src'], ucls, {'TT':Ctot},
                 lmin, lmax, k_ellmax=mlmax,
