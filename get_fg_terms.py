@@ -20,7 +20,7 @@ from orphics import maps
 from copy import deepcopy
 import sys
 from scipy.signal import savgol_filter
-from reconstruction import setup_recon, setup_asym_recon, setup_ABCD_recon
+from ksz4.reconstruction import setup_recon, setup_asym_recon, setup_ABCD_recon
 
 CB_color_cycle = ['#377eb8', '#ff7f00', '#4daf4a',
                   '#f781bf', '#a65628', '#984ea3',
