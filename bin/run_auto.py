@@ -11,17 +11,18 @@ from falafel import utils, qe
 import healpy as hp
 import yaml
 import argparse
-from orphics import maps
+from orphics import maps, mpi
 import numpy as np
 import pickle
 
 disable_mpi = get_disable_mpi()
 if not disable_mpi:
     from mpi4py import MPI
+    comm = mpi.MPI.COMM_WORLD
 
 NSPLIT=4
 MASK_PATH="/global/homes/m/maccrann/cmb/lensing/code/so-lenspipe/bin/planck/act_mask_20220316_GAL060_rms_70.00_d2.fits"
-DATA_DIR="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v1"
+DATA_DIR="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_modelsub_v1"
 
 #Read in kSZ alms
 ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("../tests/alms_4e3_2048_50_50_ksz.fits"),
@@ -55,7 +56,6 @@ def get_config(description="Do 4pt measurement"):
         else:
             t = type(val)
         defaults[key] = val
-        print(key, t, nargs)
         parser.add_argument("--%s"%key, type=t,
                             nargs=nargs)
 
@@ -63,7 +63,6 @@ def get_config(description="Do 4pt measurement"):
     #None if not set. So if that's the case, replace
     #with the default value
     args_dict=vars(parser.parse_args())
-    print("args_dict:",args_dict)
     for key in bool_keys:
         if args_dict[key] is not None:
             if args_dict[key]=='True':
@@ -72,7 +71,6 @@ def get_config(description="Do 4pt measurement"):
                 args_dict[key]=False
             else:
                 raise ValueError('%s must be True or False'%key)
-     print("args_dict:",args_dict)            
 
     output_dir = args_dict.pop("output_dir")
     """
@@ -122,15 +120,19 @@ def get_alms_dr6_hilc(data_dir="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cl
             
     return alms
 
-def get_sim_alm_dr6_hilc(data_dir="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v1",
-                         split, map_name, sim_seed, mlmax=None):
-    map_filename = opj("sim_planck%03d_act%02d_%05d"%(sim_seed),
+def get_sim_alm_dr6_hilc(map_name, sim_seed, data_dir="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v1",
+                         mlmax=None):
+    map_filenames = [opj("sim_planck%03d_act%02d_%05d"%(sim_seed),
                                    "%s_split%d.fits"%(map_name, split))
-    map_path = opj(data_dir, map_filename)
-    alm = hp.read_alm(map_path)
-    if mlmax is not None:
-        alm = utils.change_alm_lmax(alm, mlmax)
-    return alm
+                     for split in range(NSPLIT)]
+    map_paths = [opj(data_dir, f) for f in map_filenames]
+    alms = []
+    for p in map_paths:
+        alm = hp.read_alm(p)
+        if mlmax is not None:
+            alm = utils.change_alm_lmax(alm, mlmax)
+        alms.append(alm)
+    return alms
 
 def get_data_Cltot_dict(alm_dict,
                    sg_window=301, sg_order=2,
@@ -146,7 +148,7 @@ def get_data_Cltot_dict(alm_dict,
             mean_alm_j = np.average(np.array(alm_dict[map_j]), axis=0)
             cl = savgol_filter(
                 curvedsky.alm2cl(mean_alm_i, mean_alm_j),
-		sg_window, sg_order)
+                sg_window, sg_order)
             if w2 is not None:
                 cl /= w2
             cl_dict[(map_i,map_j)] = cl
@@ -155,9 +157,18 @@ def get_data_Cltot_dict(alm_dict,
 
 def main():
 
+    #setup mpi if we want it
+    if not disable_mpi:
+        comm = MPI.COMM_WORLD
+        rank,size = comm.Get_rank(), comm.Get_size()
+    else:
+        rank,size = 0,1
+    
     #get args
     args = get_config()
-    print(args)
+    if rank==0:
+        print("args:")
+        print(args)
     recon_config = vars(args)
     safe_mkdir(args.output_dir)
 
@@ -168,18 +179,15 @@ def main():
     #w4 = maps.wfactor(4, mask)
     w2 = 0.2758258447605825
     w4 = 0.2708454607428685
-    print("w2:",w2)
-    print("w4:",w4)
+    if rank==0:
+        print("w2:",w2)
+        print("w4:",w4)
 
-    #setup mpi if we want it
-    if not disable_mpi:
-        comm = MPI.COMM_WORLD
-        rank,size = comm.Get_rank(), comm.Get_size()
-    else:
-        rank,size = 0,1
     
     #read in alms for data
-    data_alms = get_alms_dr6_hilc(mlmax=args.mlmax)
+    est_maps = (args.est_maps.strip()).split("_")
+    data_alms = get_alms_dr6_hilc(mlmax=args.mlmax,
+                                  map_names=list(set(est_maps)))
 
     #get total Cls...hmm - maybe easiest to
     #estimate these from input maps to start with,
@@ -189,26 +197,29 @@ def main():
         cltot_dict = get_data_Cltot_dict(data_alms,
                    sg_window=301, sg_order=2,
                 w2=w2)
+        #save total Cls
+        with open(opj(args.output_dir,
+                      "total_Cl_from_data.pkl"), "wb") as f:
+            pickle.dump(cltot_dict, f)
     else:
         pass
         #get from sims
-            
     
     #do setup
     #decide on lmin, lmax etc.
     #and what combination of maps to use
-    est_maps = recon_config["est_maps"]
+    #est_maps = recon_config["est_maps"]
     lmin, lmax = recon_config["K_lmin"], recon_config["K_lmax"]
-    print(lmin,lmax)
 
     n_alm = len( data_alms[ list(data_alms.keys())[0] ][0] )
-    print(n_alm)
     if recon_config["mlmax"] is None:
         mlmax = hp.Alm.getlmax(n_alm)
     else:
         mlmax = args.mlmax
     
-    print("mlmax:",mlmax)
+    if rank==0:
+        print("lmin,lmax:", lmin,lmax)
+        print("mlmax:",mlmax)
 
     """
     cltot_A = cltot_dict[(est_maps[0], est_maps[0])][:mlmax+1]
@@ -221,7 +232,7 @@ def main():
     """
 
     px = qe.pixelization(shape=mask.shape,wcs=mask.wcs)
-    iici_setup = setup_ABCD_recon(
+    setup = setup_ABCD_recon(
         px, lmin, lmax, mlmax,
         cl_rksz[:mlmax+1], 
         cltot_dict[(est_maps[0], est_maps[0])][:mlmax+1], #cltot_A
@@ -236,54 +247,68 @@ def main():
     
     #run some measurements
     #filter
+    data_alms_Af = [setup["filter_A"](
+        data_alms[est_maps[0]][split])
+                    for split in range(NSPLIT)]
+    data_alms_Bf = [setup["filter_B"](
+        data_alms[est_maps[1]][split])
+                    for split in range(NSPLIT)]
+    """
     alm_hilc_f = [iici_setup["filter_A"](data_alms["hilc"][split])
                   for split in range(NSPLIT)]
     alm_tszandcibd_f = [iici_setup["filter_B"](data_alms["hilc-tszandcibd"][split])
                         for split in range(NSPLIT)]
+    data_alms_Af = alm_hilc_f
+    data_alms_Bf = alm_tszandcibd_f
+    """
+    assert est_maps[2]==est_maps[0]
+    assert est_maps[3]==est_maps[0]
+    data_alms_Cf = data_alms_Af
+    data_alms_Df = data_alms_Af
 
 
     def run_ClKK():
         #K from Q(ilc, ilc-tszandcibd)
         print("running K_AB")
-        Ks_ic = four_split_K(
-            iici_setup["qfunc_K_AB"],
-            alm_hilc_f[0], alm_hilc_f[1],
-            alm_hilc_f[2], alm_hilc_f[3],
-            Xdatp_0=alm_tszandcibd_f[0],
-            Xdatp_1=alm_tszandcibd_f[1],
-            Xdatp_2=alm_tszandcibd_f[2],
-            Xdatp_3=alm_tszandcibd_f[3],
+        Ks_ab = four_split_K(
+            setup["qfunc_K_AB"],
+            data_alms_Af[0], data_alms_Af[1],
+            data_alms_Af[2], data_alms_Af[3],
+            Xdatp_0=data_alms_Bf[0],
+            Xdatp_1=data_alms_Bf[1],
+            Xdatp_2=data_alms_Bf[2],
+            Xdatp_3=data_alms_Bf[3],
             )
-        Ks_ic_lh = four_split_K(
-            iici_setup["qfunc_K_AB_lh"],
-            alm_hilc_f[0], alm_hilc_f[1],
-            alm_hilc_f[2], alm_hilc_f[3],
-            Xdatp_0=alm_tszandcibd_f[0],
-            Xdatp_1=alm_tszandcibd_f[1],
-            Xdatp_2=alm_tszandcibd_f[2],
-            Xdatp_3=alm_tszandcibd_f[3],
+        Ks_ab_lh = four_split_K(
+            setup["qfunc_K_AB_lh"],
+            data_alms_Af[0], data_alms_Af[1],
+            data_alms_Af[2], data_alms_Af[3],
+            Xdatp_0=data_alms_Bf[0],
+            Xdatp_1=data_alms_Bf[1],
+            Xdatp_2=data_alms_Bf[2],
+            Xdatp_3=data_alms_Bf[3],
             )
 
         #K from Q(ilc,ilc)
         print("running K_CD")
-        Ks_ii = four_split_K(
-            iici_setup["qfunc_K_CD"],
-            alm_hilc_f[0], alm_hilc_f[1],
-            alm_hilc_f[2], alm_hilc_f[3],
+        Ks_cd = four_split_K(
+            setup["qfunc_K_CD"],
+            data_alms_Af[0], data_alms_Af[1],
+            data_alms_Af[2], data_alms_Af[3],
             )
-        Ks_ii_lh = four_split_K(
-            iici_setup["qfunc_K_CD_lh"],
-            alm_hilc_f[0], alm_hilc_f[1],
-            alm_hilc_f[2], alm_hilc_f[3],
+        Ks_cd_lh = four_split_K(
+            setup["qfunc_K_CD_lh"],
+            data_alms_Af[0], data_alms_Af[1],
+            data_alms_Af[2], data_alms_Af[3],
             )
 
         print("getting CL_KK")
-        cl_iici = split_phi_to_cl(Ks_ic, Ks_ii)
-        cl_iici_lh = split_phi_to_cl(Ks_ic_lh, Ks_ii_lh)
+        cl_abcd = split_phi_to_cl(Ks_ab, Ks_cd)
+        cl_abcd_lh = split_phi_to_cl(Ks_ab_lh, Ks_cd_lh)
         #apply w4
-        cl_iici /= w4
-        cl_iici_lh /= w4
-        return cl_iici, cl_iici_lh
+        cl_abcd /= w4
+        cl_abcd_lh /= w4
+        return cl_abcd, cl_abcd_lh
         print("done")
 
     if args.do_auto:
@@ -291,59 +316,153 @@ def main():
         outputs = {}
         outputs["cl_KK_raw"] = cl_iici
         outputs["cl_KK_lh_raw"] = cl_iici_lh
-        outputs["N0"] = iici_setup["N0_ABCD_K"]
-        outputs["N0_lh"] = iici_setup["N0_ABCD_K_lh"]
+        outputs["N0"] = setup["N0_ABCD_K"]
+        outputs["N0_lh"] = setup["N0_ABCD_K_lh"]
         #save pkl
         with open(opj(args.output_dir, "auto_outputs.pkl"), 'wb') as f:
             pickle.dump(outputs, f)
 
-    def run_rdn0(nsim):
-        #AB
-        def get_kmap(sim_seed):
-            alm = get_sim_alm_dr6_hilc(
-                data_dir=DATA_DIR,
-                est_maps[0], sim_seed, mlmax=mlmax)
-            alm_f = iici_setup["filter_A"](alm)
-	    return alm_f
-        def get_kmap1(sim_seed):
-            alm = get_sim_alm_dr6_hilc(
-                data_dir=DATA_DIR,
-                est_maps[1], sim_seed, mlmax=mlmax)
-            alm_f = iici_setup["filter_B"](alm)
-	    return alm_f
+            
+    def run_rdn0(setup, nsim, use_mpi=False,
+                 est=None):
+        #get sim alm functions
+        def get_sim_alms_A(i):
+            alms = get_sim_alm_dr6_hilc(
+                est_maps[0], (200+i,0,i+1),
+                data_dir=DATA_DIR, mlmax=mlmax)
+            alms_f = [setup["filter_A"](alm) for alm in alms]
+            return alms_f
 
-        def get_kmap2(sim_seed):
-            alm = get_sim_alm_dr6_hilc(
-                data_dir=DATA_DIR,
-                est_maps[2], sim_seed, mlmax=mlmax)
-            alm_f = iici_setup["filter_C"](alm)
-	    return alm_f
+        def get_sim_alms_B(i):
+            alms = get_sim_alm_dr6_hilc(
+                est_maps[1], (200+i,0,i+1),
+                data_dir=DATA_DIR, mlmax=mlmax)
+            alms_f = [setup["filter_B"](alm) for alm in alms]
+            return alms_f
 
-        def get_kmap3(sim_seed):
-            alm = get_sim_alm_dr6_hilc(
-                data_dir=DATA_DIR,
-                est_maps[3], sim_seed, mlmax=mlmax)
-            alm_f = iici_setup["filter_D"](alm)
-	    return alm_f
-        
-        rdn0,mcn0 = mcrdn0_s4(
-            icov, get_kmap, power, nsims, iici_setup["qfunc_K_AB"],
-            get_kmap1=get_kmap1, get_kmap2=get_kmap2, get_kmap3=get_kmap3,
-            qfunc2=iici_setup["qfunc_CD"], Xdat=None, Xdat1=None,Xdat2=None,Xdat3=None,
-                              use_mpi=args.use_mpi, verbose=True, skip_rd=False)
+        if est_maps[2]==est_maps[0]:
+            get_sim_alms_C = None
+        else:
+            raise NotImplementedError("")
+        if est_maps[3]==est_maps[0]:
+            get_sim_alms_D = None
+        else:
+            raise NotImplementedError("")
+
+        """
+        Copy the function definition here to help get 
+        the arguments right.
+        mcrdn0_s4(nsims, power, qfunc_AB, split_K_func,
+              get_sim_alms_A, data_split_alms_A,
+              get_sim_alms_B=None, get_sim_alms_C=None, get_sim_alms_D=None,
+              data_split_alms_B=None, data_split_alms_C=None,data_split_alms_D=None,
+              qfunc_CD=None,
+              use_mpi=True, verbose=True, skip_rd=False, power_mcn0=None):
+        """
+        if est=="lh":
+            qfunc_AB = setup["qfunc_K_AB_lh"]
+            qfunc_CD = setup["qfunc_K_CD_lh"]
+        else:
+            qfunc_AB = setup["qfunc_K_AB"]
+            qfunc_CD = setup["qfunc_K_CD"]
+        rdn0,mcn0 = mcrdn0_s4(nsim, split_phi_to_cl,
+                              qfunc_AB,
+                              four_split_K,
+                              get_sim_alms_A, data_alms_Af,
+                              get_sim_alms_B = get_sim_alms_B,
+                              data_split_alms_B = data_alms_Bf,
+                              qfunc_CD=qfunc_CD,
+                              use_mpi=use_mpi)
+
         rdn0 /= w4
         mcn0 /= w4
 
         return rdn0, mcn0
 
     if args.do_rdn0:
-        rdn0, mcn0 = run_rdn0()
+        rdn0, mcn0 = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi)
         outputs = {}
         outputs["rdn0"] = rdn0
         outputs["mcn0"] = mcn0
+
+        if args.do_lh:
+            rdn0_lh, mcn0_lh = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi,
+                                  est="lh")
+            outputs["rdn0_lh"] = rdn0_lh
+            outputs["mcn0_lh"] = mcn0_lh            
+        
+        outputs["theory_N0"] = setup["N0_ABCD_K"]
+        outputs["theory_N0_lh"] = setup["N0_ABCD_K_lh"]
         #save pkl
-        with open(opj(args.output_dir, "rdn0_outputs.pkl"), 'wb') as f:
+        rdn0_file = opj(args.output_dir, "rdn0_outputs.pkl")
+        print("saving rdn0 outputs to %s"%rdn0_file)
+        with open(rdn0_file, 'wb') as f:
             pickle.dump(outputs, f)
+    
+    #run rdn0
+    """
+    rdn0, mcn0 = run_rdn0(setup, nsim_rdn0, use_mpi=use_mpi)
+    outputs = {}
+    outputs["rdn0"] = rdn0
+    outputs["mcn0"] = mcn0
+    outputs["theory_N0"] = iici_setup["N0_ABCD_K"]
+    outputs["theory_N0_lh"] = iici_setup["N0_ABCD_K_lh"]
+    return outputs
+            
+            
+    def run_rdn0(nsim):
+        #get sim alm functions
+        def get_sim_alms_A(i):
+            alms = get_sim_alm_dr6_hilc(
+                est_maps[0], (200+i,0,i+1),
+                data_dir=DATA_DIR, mlmax=mlmax)
+            alms_f = [iici_setup["filter_A"](alm) for alm in alms]
+            return alms_f
+        
+        def get_sim_alms_B(i):
+            alms = get_sim_alm_dr6_hilc(
+                est_maps[1], (200+i,0,i+1),
+                data_dir=DATA_DIR, mlmax=mlmax)
+            alms_f = [iici_setup["filter_B"](alm) for alm in alms]
+            return alms_f
+
+        if est_maps[2]==est_maps[0]:
+            get_sim_alms_C = None
+        else:
+            raise NotImplementedError("")
+        if est_maps[3]==est_maps[0]:
+            get_sim_alms_D = None
+        else:
+            raise NotImplementedError("")
+
+
+        rdn0,mcn0 = mcrdn0_s4(args.nsim_rdn0, split_phi_to_cl,
+                              iici_setup["qfunc_K_AB"],
+                              four_split_K,
+                              get_sim_alms_A, data_alms_Af,
+                              get_sim_alms_B = get_sim_alms_B,
+                              data_split_alms_B = data_alms_Bf,
+                              qfunc_CD=iici_setup["qfunc_K_CD"],
+                              use_mpi=args.use_mpi)
+
+        rdn0 /= w4
+        mcn0 /= w4
+
+        return rdn0, mcn0
+
+    if args.do_rdn0:
+        rdn0, mcn0 = run_rdn0(args.nsim_rdn0)
+        outputs = {}
+        outputs["rdn0"] = rdn0
+        outputs["mcn0"] = mcn0
+        outputs["theory_N0"] = iici_setup["N0_ABCD_K"]
+        outputs["theory_N0_lh"] = iici_setup["N0_ABCD_K_lh"]
+        #save pkl
+        rdn0_file = opj(args.output_dir, "rdn0_outputs.pkl")
+        print("saving rdn0 outputs to %s"%rdn0_file)
+        with open(rdn0_file, 'wb') as f:
+            pickle.dump(outputs, f)
+    """
 
 
     

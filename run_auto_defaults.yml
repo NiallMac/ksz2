@@ -11,4 +11,8 @@ rksz_profile_file: sNone
 do_qe: True
 do_lh: True
 total_Cl_from_data: True
-est_maps: ["hilc", "hilc-tszandcibd", "hilc", "hilc"]
+est_maps: hilc_hilc-tszandcibd_hilc_hilc
+do_rdn0: False
+do_auto: True
+use_mpi: False
+nsim_rdn0: 10
