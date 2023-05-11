@@ -15,7 +15,7 @@ from os.path import join as opj
 import argparse
 import yaml
 from collections import OrderedDict
-from cmbsky import safe_mkdir, get_disable_mpi, DEFAULTS, get_cmb_alm_unlensed, get_cmb_seeds
+from cmbsky import safe_mkdir, get_disable_mpi, get_cmb_alm_unlensed, get_cmb_seeds
 from orphics import maps
 from websky_model import WebSky
 from copy import deepcopy
@@ -31,6 +31,8 @@ disable_mpi = get_disable_mpi()
 if not disable_mpi:
     from mpi4py import MPI
 
+with open("defaults.yaml",'rb') as f:
+    DEFAULTS=yaml.load(f)
 
 def get_cl_smooth(alms):
     cl = curvedsky.alm2cl(alms)
@@ -427,19 +429,21 @@ def setup_recon(prep_map_config, recon_config,
 
     return recon_stuff
 
-def get_alm_files(config, map_dir, freq,
+def get_alm_files(map_dir, freq,
                   get_masked=False, get_unlensed=False):
     alm_files = OrderedDict([])
     alm_files["sky"] = opj(map_dir,"sky_alms_%s.fits"%freq)
     alm_files["cmb"] = opj(map_dir,"cmb_alms_%s.fits"%freq)
     alm_files["kszr"] = opj(map_dir,"kszr_alms_%s.fits"%freq)
-    if get_masked:
-        alm_files["sky_masked"] = opj(
-            map_dir,"sky_masked_alms_%s.fits"%freq)
+    #if get_masked:
+    #    alm_files["sky_masked"] = opj(
+    #        map_dir,"sky_masked_alms_%s.fits"%freq)
     if get_unlensed:
         alm_files["sky_unlensed"] = opj(
             map_dir,"sky_unlensed_alms_%s.fits"%freq)
     return alm_files
+
+from reconstruction import setup_recon
 
 def main():
 
@@ -456,12 +460,14 @@ def main():
     #get config from prep map stage
     with open(opj(args.output_dir, 'prep_map', 'prepare_map_config.yml'),'r') as f:
         prep_map_config = yaml.load(f)
-    #has_masked=False
-    has_fgs = prep_map_config["has_fgs"]
-    has_masked = ((prep_map_config["halo_mask_fgs"])
-                  or (prep_map_config["cib_flux_cut"] is not None))
     map_dir = opj(args.output_dir, "prep_map")
 
+    #pixelisation - for websky and sehgal assume
+    #this is healpix
+    px = qe.pixelization(nside=recon_config['nside'])
+
+    map_dir = opj(args.output_dir, "prep_map")
+    
     #make output subdirectory for reconstruction stuff
     recon_dir = opj(args.output_dir, "recon_%s"%args.tag)
     safe_mkdir(recon_dir)
@@ -469,18 +475,16 @@ def main():
         recon_config['mlmax'] = prep_map_config["mlmax"]
     if recon_config['freqs'] is None:
         recon_config['freqs'] = prep_map_config['freqs']
+    print(recon_config)
     #save args to output dir
     arg_file = opj(recon_dir,'recon_config.yml')
     if rank==0:
         with open(arg_file,'w') as f:
             yaml.dump(recon_config, f)
     
-    print("doing setup")
-    recon_setup = setup_recon(
-        prep_map_config, recon_config)
-    filter_alms = recon_setup['filter_alms']
+    #Get rksz power
+    cl_rksz = np.load(recon_config["rksz_cl_file"])
 
-    print(prep_map_config)
     cmb_seeds = get_cmb_seeds(args)
     if cmb_seeds is None:
         cmb_seeds = prep_map_config['cmb_seeds']
@@ -501,9 +505,9 @@ def main():
             continue
         cmb_seed = cmb_seeds[icmb]
         if cmb_seed is None:
-            map_dir_this_seed = opj(map_dir, "no_cmb")
-            recon_dir_this_seed = opj(recon_dir, "no_cmb")
-            print("doing reconstruction for no cmb case")
+            map_dir_this_seed = opj(map_dir, "cmb_orig")
+            recon_dir_this_seed = opj(recon_dir, "cmb_orig")
+            print("doing reconstruction for cmb orig case")
         else:
             map_dir_this_seed = opj(map_dir, "cmb_%d"%cmb_seed)
             recon_dir_this_seed = opj(recon_dir, "cmb_%d"%cmb_seed)
@@ -511,203 +515,269 @@ def main():
 
         safe_mkdir(recon_dir_this_seed)
 
+        #Load total cl data
+        f = opj(map_dir_this_seed,
+                "Cltot_data.npy")
+        cltot_data = np.load(f)
         for freq in args.freqs:
-            #Read alms for reconstruction
-            alm_files = get_alm_files(prep_map_config, map_dir_this_seed,
-                                      freq, get_masked=has_masked,
-                                      get_unlensed=False)
-            """
-            print(alm_files)
-            dtype = [(tag,float) for tag in alm_files]
-            dtype += [(tag+"_N0", float) for tag in alm_files]
-            dtype += [("total_N0", float),
-                      ("total_N0_lh", float),
-                      ("total_N0_psh", float)]
-            if args.do_lh:
-                dtype += [(tag+"_lh",float) for tag in alm_files]
-            if args.do_psh:
-                dtype += [(tag+"_psh",float) for tag in alm_files]
-            cl_rr_out = np.zeros(recon_config['mlmax']+1,
-                                 dtype = dtype)
-            """
-            cl_rr_out = {}
-            for tag, alm_file in alm_files.items():
-                if tag in args.skip_tags:
-                    print("skipping %s reconstruction"%tag)
-                    continue
-                print("doing %s reconstruction"%tag)
-                alms = hp.fitsfunc.read_alm(
-                    alm_file)
-                alms = utils.change_alm_lmax(alms, recon_config['mlmax'])
-                #cl_tag = get_cl_smooth(alms) #the smoothed cl for this tag
-                filtered_alms = filter_alms(alms)
-                K_lmin, K_lmax, mlmax = (recon_config['K_lmin'],
-                                         recon_config['K_lmax'],
-                                         recon_config['mlmax'])
-                profile = recon_setup['profile']
-                norm_s = recon_setup["norm_s"]
-                norm_ps = recon_setup["norm_ps"]
-                norm_K = recon_setup["norm_K"]
-                R_s_ps = recon_setup["R_s_ps"]
-                norm_lens = recon_setup["norm_lens"]
-                R_K_lens = recon_setup["R_s_tt"]
+
+            #This may change but I'm allowing args.freqs
+            #to be e.g. freqcoadd or tsz-sym as well as just
+            #numbers. So check if freq is a number
+            freq_is_number = True
+            try:
+                float(freq)
+            except ValueError:
+                freq_is_number = False
+
+            is_freq_diff=False
+            if '-' in str(freq):
+                try:
+                    float(freq.split('-')[0])
+                    float(freq.split('-')[1])
+                    is_freq_diff = True
+                except ValueError:
+                    pass
+
+            #These are the cases where we're using the same map in
+            #each leg
+            
+            if (freq_is_number or
+                (freq in ['hilc','hilc-tszd','hilc-cibd',
+                          'hilc-tszandcibd','freqcoadd'])
+                or is_freq_diff):
+                sky_alm_file = opj(map_dir_this_seed,
+                               "sky_alms_%s.fits"%freq)
+                sky_alms = hp.fitsfunc.read_alm(alm_file)
+                sky_alms = utils.change_alm_lmax(
+                    alms, recon_config['mlmax'])
+                cmb_alm_file = opj(map_dir_this_seed,
+                                   "cmb_alms.fits")
+                cmb_alms = utils.change_alm_lmax(
+                    hp.fitsfunc.read_alm(cmb_alm_file))
                 
-                if args.do_qe:
-                    if args.normalized:
-                        qfunc = recon_setup["qfunc_normed"]
-                    else:
-                        qfunc = recon_setup["qfunc_sf"]
-                        
-                    #No bias hardening
-                    K_recon_alms = qfunc(filtered_alms,
-                                           filtered_alms)
-                    hp.fitsfunc.write_alm(
-                        opj(recon_dir_this_seed,
-                            os.path.basename(alm_file).replace(".fits","_K-recon.fits"),
-                        ),
-                        K_recon_alms, overwrite=True
-                            )
-                    cl_rr = curvedsky.alm2cl(
-                        K_recon_alms)
-                    cl_rr_out[tag] = cl_rr
+            #The asymmetric (and symmetrized cases). Not here I've
+            #hardcoded that we're using ilc in one of the legs, we
+            #may want to generalize that. Read in a tuple of foreground
+            #alms 
+            elif freq in ["tszd-sym", "cibd-sym", "tszandcibd-sym"]:
+                raise NotImplementedError("not yet implemented assymetric estimator")
+            else:
+                raise ValueError("frequency %s not recognized"%freq)
 
-                    #Also get analytic N_0
-                    if tag == "kszr":
-                        cl_signal = recon_setup["cl_kszr"]
-                        Ctot = recon_setup['cl_total']**2 / cl_signal
-                        norm_ksz = pytempura.get_norms(
-                            ['src'], recon_setup['ucls'], {'TT':Ctot},
-                            K_lmin, K_lmax,
-                            k_ellmax=mlmax,
-                            profile=profile)['src']
-                        N0 = norm_s**2 / norm_ksz
+            if isinstance(fg_alms, tuple):
+                raise NotImplementedError("not yet implemented assymetric estimator")
+            else:
+                cl_sky_minus_cmb = get_cl_fg_smooth(sky_alms-cmb_alms)
+            
+            #Get noise for filters
+            Nl_tt = cltot_data["Nltt_%s"%freq][:recon_config["mlmax"]+1]
+            nells = {"TT":Nl_tt, "EE":2*Nl_tt, "BB":2*Nl_tt}
+            _,tcls = utils.get_theory_dicts(grad=True, nells=nells,
+                                            lmax=recon_config["mlmax"])
+            tcls['TT'] = cltot_data["Cltt_total_%s"%freq][:recon_config["mlmax"]+1]
+            if recon_config["add_rkszcl_to_filter"]:
+                tcls["TT"] += cl_rksz
 
-                    elif tag == "cmb":
-                        cl_signal = recon_setup["cl_total_cmb"]
+            lmin,lmax=recon_config["K_lmin"], recon_config["K_lmax"]
+            recon_stuff = setup_recon(
+                px, lmin, lmax, recon_config["mlmax"],
+                cl_rksz, tcls, do_lh=args.do_lh,
+                do_psh=args.do_psh)
+
+            """
+            if cltot_data is not None:
+                print(cltot_data.dtype.names)
+                if freq in cltot_data.dtype.names:
+                    recon_config["Cl_tot"] = cltot_data[freq]
+                else:
+                    print("no Cl_tot for freq %s, will use other options"%freq)
+                    recon_config["Cl_tot"] = None
+            """
+
+            filter_alms = recon_stuff['filter_alms_X']
+            profile = recon_stuff['profile']
+            qfuncs = [("qe", recon_stuff["qfunc_K"])]
+            if args.do_psh:
+                qfuncs.append(
+                    ("psh", recon_stuff["qfunc_K_psh"])
+                    )
+            if args.do_lh:
+                qfuncs.append(
+                    ("lh", recon_stuff["qfunc_K_lh"])
+                    )
+
+                
+            cl_rr_out = {}
+            #cl_tag = get_cl_smooth(alms) #the smoothed cl for this tag
+            filtered_alms = filter_alms(alms)
+            K_lmin, K_lmax, mlmax = (recon_config['K_lmin'],
+                                     recon_config['K_lmax'],
+                                     recon_config['mlmax'])
+            profile = recon_setup['profile']
+            norm_s = recon_setup["norm_s"]
+            norm_ps = recon_setup["norm_ps"]
+            norm_K = recon_setup["norm_K"]
+            R_s_ps = recon_setup["R_s_ps"]
+            norm_lens = recon_setup["norm_lens"]
+            R_K_lens = recon_setup["R_s_tt"]
+
+            if args.do_qe:
+                if args.normalized:
+                    qfunc = recon_setup["qfunc_normed"]
+                else:
+                    qfunc = recon_setup["qfunc_sf"]
+
+                #No bias hardening
+                K_recon_alms = qfunc(filtered_alms,
+                                       filtered_alms)
+                hp.fitsfunc.write_alm(
+                    opj(recon_dir_this_seed,
+                        os.path.basename(alm_file).replace(".fits","_K-recon.fits"),
+                    ),
+                    K_recon_alms, overwrite=True
+                        )
+                cl_rr = curvedsky.alm2cl(
+                    K_recon_alms)
+                cl_rr_out[tag] = cl_rr
+
+                #Also get analytic N_0
+                if tag == "kszr":
+                    cl_signal = recon_setup["cl_kszr"]
+                    Ctot = recon_setup['cl_total']**2 / cl_signal
+                    norm_ksz = pytempura.get_norms(
+                        ['src'], recon_setup['ucls'], {'TT':Ctot},
+                        K_lmin, K_lmax,
+                        k_ellmax=mlmax,
+                        profile=profile)['src']
+                    N0 = norm_s**2 / norm_ksz
+
+                elif tag == "cmb":
+                    cl_signal = recon_setup["cl_total_cmb"]
+                    Ctot = recon_setup['cl_total']**2 / cl_signal
+                    norm_cmb = pytempura.get_norms(
+                        ['src'], recon_setup['ucls'], {'TT':Ctot},
+                        K_lmin, K_lmax,
+                        k_ellmax=mlmax, profile=profile)['src']
+                    N0 = norm_s**2 / norm_cmb
+
+                elif tag == "sky":
+                    if prep_map_config["disable_noise"]:
+                        cl_signal = recon_setup["cl_kszr"] + recon_setup["cl_total_cmb"]
                         Ctot = recon_setup['cl_total']**2 / cl_signal
-                        norm_cmb = pytempura.get_norms(
+                        norm_sky = pytempura.get_norms(
                             ['src'], recon_setup['ucls'], {'TT':Ctot},
                             K_lmin, K_lmax,
                             k_ellmax=mlmax, profile=profile)['src']
-                        N0 = norm_s**2 / norm_cmb
-
-                    elif tag == "sky":
-                        if prep_map_config["disable_noise"]:
-                            cl_signal = recon_setup["cl_kszr"] + recon_setup["cl_total_cmb"]
-                            Ctot = recon_setup['cl_total']**2 / cl_signal
-                            norm_sky = pytempura.get_norms(
-                                ['src'], recon_setup['ucls'], {'TT':Ctot},
-                                K_lmin, K_lmax,
-                                k_ellmax=mlmax, profile=profile)['src']
-                            N0 = norm_s**2 / norm_sky
-                        else:
-                            N0 = norm_s 
-
+                        N0 = norm_s**2 / norm_sky
                     else:
-                        N0 = np.nan * np.ones_like(norm_s)
+                        N0 = norm_s 
+
+                else:
+                    N0 = np.nan * np.ones_like(norm_s)
+
+                #Convert from N0 for s to K
+                N0 /= (profile)**2
+                N0_nonorm = N0 / norm_K**2
+                cl_rr_out[tag+"_N0_normed"] = N0
+                cl_rr_out[tag+"_N0_nonorm"] = N0_nonorm
+
+                """
+                #Also save total N0 (including noise)
+                if args.normalized:
+                    total_N0 = norm_s * (2*profile)**2
+                else:
+                    total_N0 = (2 * profile)**2 / norm_s
+                cl_rr_out["total_N0"] = total_N0
+                """
+
+            #With lensing hardening
+            if args.do_lh:
+                print("doing lensing-hardened reconstruction")
+                if args.normalized:
+                    qfunc_lh = recon_setup["qfunc_lh_normed"]
+                else:
+                    qfunc_lh = recon_setup["qfunc_lh_sf"]
+                K_recon_alms_lh = qfunc_lh(
+                    filtered_alms, filtered_alms)
+                hp.fitsfunc.write_alm(
+                    opj(recon_dir_this_seed,
+                        os.path.basename(alm_file).replace(".fits","_K-recon-lh.fits"),
+                    ),
+                    K_recon_alms_lh, overwrite=True
+                        )
+                cl_rr_out[tag+"_lh"] = curvedsky.alm2cl(
+                    K_recon_alms_lh)
+
+                #It'll be interesting to save the
+                #result of the lensing estimator on the
+                #kSZ map
+                if tag == "kszr":
+                    kszr_phi_alms = qfunc_lh(
+                        filtered_alms, filtered_alms)
+                    hp.fitsfunc.write_alm(
+                        opj(recon_dir_this_seed,
+                            os.path.basename(alm_file).replace(".fits","_kszr_phi_recon.fits"),
+                        ),
+                        kszr_phi_alms, overwrite=True
+                    )
+                    cl_signal = recon_setup["cl_kszr"]
+                    Ctot = recon_setup['cl_total']**2 / cl_signal
+                    norm_lens = recon_setup["norm_lens"]
+                    R_s_lens = recon_setup["R_s_tt"]
+                    norm_lens_fg = pytempura.norm_lens.qtt(
+                        mlmax, K_lmin, K_lmax, recon_setup['ucls']['TT'],
+                        Ctot, gtype='')[0]
+                    R_s_lens_fg = pytempura.get_cross(
+                        'SRC','TT', recon_setup['ucls'], {"TT" : Ctot},
+                        K_lmin, K_lmax, k_ellmax = mlmax,
+                        profile = profile)
+                    N0 = norm_s**2/norm_ksz
+                    N0_lens = norm_lens**2 / norm_lens_fg
+                    N0_bh = (N0 + R_s_lens**2 * norm_s**2 * N0_lens
+                              - 2 * R_s_lens * norm_s**2 * norm_lens * R_s_lens_fg)
+                    N0_bh /= (1 - norm_s*norm_lens*R_s_lens**2)**2
 
                     #Convert from N0 for s to K
-                    N0 /= (profile)**2
-                    N0_nonorm = N0 / norm_K**2
-                    cl_rr_out[tag+"_N0_normed"] = N0
-                    cl_rr_out[tag+"_N0_nonorm"] = N0_nonorm
+                    N0_bh /= (profile)**2
+                    N0_bh_nonorm = N0 / norm_K**2
+                    cl_rr_out[tag+"_N0_lh_normed"] = N0_bh
+                    cl_rr_out[tag+"_N0_lh_nonorm"] = N0_bh_nonorm
 
-                    """
-                    #Also save total N0 (including noise)
-                    if args.normalized:
-                        total_N0 = norm_s * (2*profile)**2
-                    else:
-                        total_N0 = (2 * profile)**2 / norm_s
-                    cl_rr_out["total_N0"] = total_N0
-                    """
-                    
-                #With lensing hardening
-                if args.do_lh:
-                    print("doing lensing-hardened reconstruction")
-                    if args.normalized:
-                        qfunc_lh = recon_setup["qfunc_lh_normed"]
-                    else:
-                        qfunc_lh = recon_setup["qfunc_lh_sf"]
-                    K_recon_alms_lh = qfunc_lh(
-                        filtered_alms, filtered_alms)
-                    hp.fitsfunc.write_alm(
-                        opj(recon_dir_this_seed,
-                            os.path.basename(alm_file).replace(".fits","_K-recon-lh.fits"),
-                        ),
-                        K_recon_alms_lh, overwrite=True
-                            )
-                    cl_rr_out[tag+"_lh"] = curvedsky.alm2cl(
-                        K_recon_alms_lh)
+                #Also save the total N0 for this case
+                """
+                total_N0 = norm_s / (1 - norm_s * norm_lens * R_K_lens**2)
+                total_N0 *=  (2 * profile)**2
+                if not args.normalized:
+                    total_N0 /= norm_s
+                cl_rr_out["total_N0_lh"] = total_N0
+                """
 
-                    #It'll be interesting to save the
-                    #result of the lensing estimator on the
-                    #kSZ map
-                    if tag == "kszr":
-                        kszr_phi_alms = qfunc_lh(
-                            filtered_alms, filtered_alms)
-                        hp.fitsfunc.write_alm(
-                            opj(recon_dir_this_seed,
-                                os.path.basename(alm_file).replace(".fits","_kszr_phi_recon.fits"),
-                            ),
-                            kszr_phi_alms, overwrite=True
+            if args.do_psh:
+                print("doing point source-hardened reconstruction")
+                if args.normalized:
+                    qfunc_psh = recon_setup["qfunc_psh_normed"]
+                else:
+                    qfunc_psh = recon_setup["qfunc_psh_sf"]
+                K_recon_alms_psh = qfunc_psh(
+                    filtered_alms, filtered_alms)
+                hp.fitsfunc.write_alm(
+                    opj(recon_dir_this_seed,
+                        os.path.basename(alm_file).replace(".fits","_K-recon-psh.fits"),
+                    ),
+                    K_recon_alms_psh, overwrite=True
                         )
-                        cl_signal = recon_setup["cl_kszr"]
-                        Ctot = recon_setup['cl_total']**2 / cl_signal
-                        norm_lens = recon_setup["norm_lens"]
-                        R_s_lens = recon_setup["R_s_tt"]
-                        norm_lens_fg = pytempura.norm_lens.qtt(
-                            mlmax, K_lmin, K_lmax, recon_setup['ucls']['TT'],
-                            Ctot, gtype='')[0]
-                        R_s_lens_fg = pytempura.get_cross(
-                            'SRC','TT', recon_setup['ucls'], {"TT" : Ctot},
-                            K_lmin, K_lmax, k_ellmax = mlmax,
-                            profile = profile)
-                        N0 = norm_s**2/norm_ksz
-                        N0_lens = norm_lens**2 / norm_lens_fg
-                        N0_bh = (N0 + R_s_lens**2 * norm_s**2 * N0_lens
-                                  - 2 * R_s_lens * norm_s**2 * norm_lens * R_s_lens_fg)
-                        N0_bh /= (1 - norm_s*norm_lens*R_s_lens**2)**2
-                        
-                        #Convert from N0 for s to K
-                        N0_bh /= (profile)**2
-                        N0_bh_nonorm = N0 / norm_K**2
-                        cl_rr_out[tag+"_N0_lh_normed"] = N0_bh
-                        cl_rr_out[tag+"_N0_lh_nonorm"] = N0_bh_nonorm
+                cl_rr_out[tag+"_psh"] = curvedsky.alm2cl(
+                    K_recon_alms_psh)
 
-                    #Also save the total N0 for this case
-                    """
-                    total_N0 = norm_s / (1 - norm_s * norm_lens * R_K_lens**2)
-                    total_N0 *=  (2 * profile)**2
-                    if not args.normalized:
-                        total_N0 /= norm_s
-                    cl_rr_out["total_N0_lh"] = total_N0
-                    """
-                    
-                if args.do_psh:
-                    print("doing point source-hardened reconstruction")
-                    if args.normalized:
-                        qfunc_psh = recon_setup["qfunc_psh_normed"]
-                    else:
-                        qfunc_psh = recon_setup["qfunc_psh_sf"]
-                    K_recon_alms_psh = qfunc_psh(
-                        filtered_alms, filtered_alms)
-                    hp.fitsfunc.write_alm(
-                        opj(recon_dir_this_seed,
-                            os.path.basename(alm_file).replace(".fits","_K-recon-psh.fits"),
-                        ),
-                        K_recon_alms_psh, overwrite=True
-                            )
-                    cl_rr_out[tag+"_psh"] = curvedsky.alm2cl(
-                        K_recon_alms_psh)
-
-                    """
-                    #Also save the total N0 for this case
-                    total_N0 = norm_s / (1 - norm_s * norm_ps * R_s_ps**2)
-                    total_N0 *= (2 * profile)**2
-                    if not args.normalized:
-                        total_N0 /= norm_s
-                    cl_rr_out["total_N0_psh"] = total_N0                
-                    """
+                """
+                #Also save the total N0 for this case
+                total_N0 = norm_s / (1 - norm_s * norm_ps * R_s_ps**2)
+                total_N0 *= (2 * profile)**2
+                if not args.normalized:
+                    total_N0 /= norm_s
+                cl_rr_out["total_N0_psh"] = total_N0                
+                """
 
             for key in ["N0_K_normed","N0_K_nonorm",
                         "N0_K_lh_normed","N0_K_lh_nonorm",

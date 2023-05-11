@@ -19,6 +19,8 @@ from os.path import join as opj
 import argparse
 import yaml
 from collections import OrderedDict
+import sys
+sys.path.append("..")
 from prepare_maps import safe_mkdir, get_disable_mpi, DEFAULTS, get_cmb_alm_unlensed, get_cmb_seeds
 from orphics import maps
 from websky_model import WebSky, CONVERSION_FACTORS
@@ -31,16 +33,16 @@ from scipy.signal import savgol_filter
 
 # In[2]:
 
-plot_cmb_n0=True
+plot_cmb_n0=False
 
 #lmax for SHTs
-mlmax=4000
+mlmax=6000
 #lmin and lmax for filter
-lmin=2000
-lmax=3000
+lmin=3000
+lmax=6000
 #beam and noise
-noise_sigma = 822.
-beam_fwhm = 4.8
+noise_sigma = 10.
+beam_fwhm = 1.
 ells = np.arange(mlmax+1)
 bfact = maps.gauss_beam(beam_fwhm,ells)**2.
 Nl_tt = (noise_sigma*np.pi/180./60.)**2./bfact
@@ -61,7 +63,7 @@ ucls,tcls = utils.get_theory_dicts(grad=True,
 # Read in CIB map, convert to temperature, and then to alms
 #And make ksz2 filter                                                                                                                                                                                        
 #Read alms and get (smoothed) Cl for filter                                                                                                                                                                                                                                                                                                                                                      
-alm_file = "tests/alms_4e3_2048_50_50_ksz.fits"
+alm_file = "../tests/alms_4e3_2048_50_50_ksz.fits"
 ksz_alms=hp.fitsfunc.read_alm(alm_file)
 alm_lmax=hp.Alm.getlmax(len(ksz_alms))
 if alm_lmax>mlmax:

@@ -1,0 +1,18 @@
+K_lmin: 3000
+K_lmax: 4000
+tag: '0'
+freqs: sNone
+mlmax: iNone
+cmb_seeds: liNone
+cmb_seed_start: iNone
+cmb_seed_end: iNone
+rksz_profile_file: sNone
+#profile_file: sNone #file with profile
+do_qe: True
+do_lh: True
+total_Cl_from_data: True
+est_maps: hilc_hilc-tszandcibd_hilc_hilc
+do_rdn0: False
+do_auto: True
+use_mpi: False
+nsim_rdn0: 10

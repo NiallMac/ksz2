@@ -80,7 +80,7 @@ def main():
     recon_setup = setup_recon(
         prep_map_config, recon_config, sim_start_ind=args.sim_start)
     filter_alms = recon_setup['filter_alms']
-    qfunc = recon_setup['qfunc']
+    qfunc = recon_setup['qfunc_normed']
 
     sim_range_tag = "%s-%s"%(str(args.sim_start).zfill(3),
                              str(args.sim_start+args.nsim_n0).zfill(3)
@@ -233,7 +233,7 @@ def main():
 
                     #lensing hardened
                     if args.do_lh:
-                        qfunc_lh = recon_setup['qfunc_lh']
+                        qfunc_lh = recon_setup['qfunc_lh_normed']
                         rdn0_lh,mcn0_lh = mcrdn0(
                                 0, get_sim_alm, powfunc, args.nsim_n0, 
                                 qfunc_lh, qfunc2=None, Xdat=data_alm_filtered, use_mpi=True)
@@ -245,7 +245,7 @@ def main():
                         np.savez(f, rdn0=rdn0_lh, mcn0=mcn0_lh)
 
                     if args.do_psh:
-                        qfunc_psh = recon_setup['qfunc_psh']
+                        qfunc_psh = recon_setup['qfunc_psh_normed']
                         rdn0_psh,mcn0_psh = mcrdn0(
                                 0, get_sim_alm, powfunc, args.nsim_n0, 
                                 qfunc_psh, qfunc2=None, Xdat=data_alm_filtered, use_mpi=True)
@@ -256,18 +256,6 @@ def main():
                                 )
                         np.savez(f, rdn0=rdn0_psh, mcn0=mcn0_psh)
                         
-                    #lensing hardened second version
-                    if args.do_lh2:
-                        qfunc_lh2 = recon_setup['qfunc_lh2']
-                        rdn0_lh2,mcn0_lh2 = mcrdn0(
-                                0, get_sim_alm, powfunc, args.nsim_n0, 
-                                qfunc_lh2, qfunc2=None, Xdat=data_alm_filtered, use_mpi=True)
-                        f = opj(bias_dir_this_seed,
-                                "rdn0_%s_%s_%s.npz"%(
-                                    freq, tag+"_lh2", sim_range_tag
-                                    )
-                                )
-                        np.savez(f, rdn0=rdn0_lh2, mcn0=mcn0_lh2)
                 
         if args.do_n1:
             n1_sim_range_tag = "%s-%s"%(str(0).zfill(3),
@@ -289,12 +277,20 @@ def main():
 
             if args.do_lh:
                 n1 = mcn1(0, get_sim_alm, powfunc, args.nsims_n1,
-                          recon_setup['qfunc_lh'], qfunc2=None)
+                          recon_setup['qfunc_lh_normed'], qfunc2=None)
                 f = opj(bias_dir_this_seed,
                         "n1_lh_%s.npz"%(
                             n1_sim_range_tag))
                 np.save(f, n1)
-                
+
+            if args.do_lh:
+                n1 = mcn1(0, get_sim_alm, powfunc, args.nsims_n1,
+                          recon_setup['qfunc_psh_normed'], qfunc2=None)
+                f = opj(bias_dir_this_seed,
+                        "n1_psh_%s.npz"%(
+                            n1_sim_range_tag))
+                np.save(f, n1)
+
                 
                 
         bias_stuff_file = opj(bias_dir_this_seed, "bias_stuff.pkl")
