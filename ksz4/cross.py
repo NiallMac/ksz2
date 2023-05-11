@@ -1,5 +1,8 @@
 import pixell.curvedsky as cs
 import numpy as np
+from orphics import mpi
+from pixell import utils
+from pixell.mpi import FakeCommunicator
 
 def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xdatp_2=None,Xdatp_3=None):
     """Return kappa_alms combinations required for the 4cross estimator.
@@ -104,70 +107,125 @@ def split_phi_to_cl(xy,uv,m=4,cross=False,ikalm=None):
     auto =(1/(m*(m-1)*(m-2)*(m-3)))*(tg1+tg2+tg3)
     return auto
 
-def mcrdn0_s4(icov, get_kmap, power, nsims, qfunc1,get_kmap1=None,get_kmap2=None,get_kmap3=None, qfunc2=None, Xdat=None,Xdat1=None,Xdat2=None,Xdat3=None, use_mpi=True, 
-              verbose=True, skip_rd=False,shear=False,power_mcn0=None, phifunc=None):
-         
-    qa = phifunc
-    if qa is None:
-        def qa(X):
-            return X
-    qf1 = qfunc1
-    qf2 = qfunc2
+def mcrdn0_s4(nsims, power, qfunc_AB, split_K_func,
+              get_sim_alms_A, data_split_alms_A,
+              get_sim_alms_B=None, get_sim_alms_C=None, get_sim_alms_D=None,
+              data_split_alms_B=None, data_split_alms_C=None,data_split_alms_D=None,
+              qfunc_CD=None,
+              use_mpi=True, verbose=True, skip_rd=False, power_mcn0=None):
+
+    """
+    get_sim_alms_<X> return list of alms, 1 for each split
+    """
     
+    if qfunc_CD is None:
+        qfunc_CD = qfunc_AB
+
     mcn0evals = []
     if not(skip_rd): 
-        assert Xdat is not None # Data
-        if Xdat1 is None:
-            Xdat1=Xdat
+        assert data_split_alms_A is not None # Data
+        if data_split_alms_B is None:
+            data_split_alms_B = data_split_alms_A
+        if data_split_alms_C is None:
+            data_split_alms_C = data_split_alms_A
+        if data_split_alms_D is None:
+            data_split_alms_D = data_split_alms_A
         rdn0evals = []
 
     if use_mpi:
-        comm,rank,my_tasks = mpi.distribute(nsims)
+        comm,rank,my_tasks = mpi.distribute(nsims, allow_empty=True)
     else:
         comm,rank,my_tasks = FakeCommunicator(), 0, range(nsims)
         
 
     for i in my_tasks:
-        i=i+2
-        if rank==0 and verbose: print("MCRDN0: Rank %d doing task %d" % (rank,i))
-        Xs  = get_kmap((icov,0,i))
-        Xs1= get_kmap1((icov,0,i))
-        Xs2= get_kmap2((icov,0,i))
-        Xs3= get_kmap3((icov,0,i))
+        if verbose:
+            print("MCRDN0: Rank %d doing task %d" % (rank,i))
 
-
-        if not(skip_rd): 
-            qaXXs = qa(Xdat,Xdat1,Xdat2,Xdat3,Xs,Xs1,Xs2,Xs3,qf1) #for the two split case, one would need two get_kmaps?, or instead returns an array of maps, [i] for split i
-            qbXXs = qa(Xdat,Xdat1,Xdat2,Xdat3,Xs,Xs1,Xs2,Xs3,qf2) if qf2 is not None else qaXXs 
-            qaXsX = qa(Xs,Xs1,Xs2,Xs3,Xdat,Xdat1,Xdat2,Xdat3,qf1) 
-            qbXsX = qa(Xs,Xs1,Xs2,Xs3,Xdat,Xdat1,Xdat2,Xdat3,qf2) if qf2 is not None else qaXsX 
-            rdn0_only_term = power(qaXXs,qbXXs)+ power(qaXXs,qbXsX) + power(qaXsX,qbXXs) \
-                    + power(qaXsX,qbXsX) 
-
-        Xsp = get_kmap((icov,0,i+1)) 
-        Xsp1 = get_kmap1((icov,0,i+1)) 
-        Xsp2 = get_kmap2((icov,0,i+1)) 
-        Xsp3 = get_kmap3((icov,0,i+1)) 
-
-        if shear:
-            qaXsXsp = plensing.phi_to_kappa(qf1(Xs[0],Xsp[1])) #split1 
-            qbXsXsp = plensing.phi_to_kappa(qf2(Xs[0],Xsp[1])) if qf2 is not None else qaXsXsp #split2
-            qbXspXs = plensing.phi_to_kappa(qf2(Xsp[0],Xs[1])) if qf2 is not None else plensing.phi_to_kappa(qf1(Xsp[0],Xs[1])) #this is not present
-        else:
-            if power_mcn0 is None:
-                qaXsXsp = qa(Xs,Xs1,Xs2,Xs3,Xsp,Xsp1,Xsp2,Xsp3,qf1) #split1 
-                qbXsXsp = qa(Xs,Xs1,Xs2,Xs3,Xsp,Xsp1,Xsp2,Xsp3,qf2) if qf2 is not None else qaXsXsp #split2
-                qbXspXs = qa(Xsp,Xsp1,Xsp2,Xsp3,Xs,Xs1,Xs2,Xs3,qf2) if qf2 is not None else qa(Xsp,Xsp1,Xsp2,Xsp3,Xs,Xs1,Xs2,Xs3,qf1) #this is not present
-                mcn0_term = (power(qaXsXsp,qbXsXsp) + power(qaXsXsp,qbXspXs))
+        #get the sim alms
+        def get_sim_alms(seed):
+            sim_alms_A = get_sim_alms_A(seed)
+            if get_sim_alms_B is not None:
+                sim_alms_B = get_sim_alms_B(seed)
             else:
-                qaXsXsp = plensing.phi_to_kappa(qf1(Xs,Xsp)) #split1 
-                qbXsXsp = plensing.phi_to_kappa(qf2(Xs,Xsp)) if qf2 is not None else qaXsXsp #split2
-                qbXspXs = plensing.phi_to_kappa(qf2(Xsp,Xs)) if qf2 is not None else plensing.phi_to_kappa(qf1(Xsp,Xs)) #this is not present
-                mcn0_term = (power_mcn0(qaXsXsp,qbXsXsp) + power_mcn0(qaXsXsp,qbXspXs))
+                sim_alms_B = sim_alms_A
+            if get_sim_alms_C is not None:
+                sim_alms_C = get_sim_alms_C(seed)
+            else:
+                sim_alms_C = sim_alms_A
+            if get_sim_alms_D is not None:
+                sim_alms_D = get_sim_alms_D(seed)
+            else:
+                sim_alms_D = sim_alms_A
+            return sim_alms_A, sim_alms_B, sim_alms_C, sim_alms_D
+
+        if verbose:
+            print("getting sim alms")
+        sim_alms_A, sim_alms_B, sim_alms_C, sim_alms_D = get_sim_alms(2*i)
+        sim_alms_Ap, sim_alms_Bp, sim_alms_Cp, sim_alms_Dp = get_sim_alms(2*i+1)
+        
+        #Xs0  = get_kmap((icov,0,i))
+        #Xs1= get_kmap1((icov,0,i))
+        #Xs2= get_kmap2((icov,0,i))
+        #Xs3= get_kmap3((icov,0,i))
+
+
+        if not(skip_rd):
+            #replaces qaXXs
+            if verbose:
+                print("doing DS terms")
+            qABs = split_K_func(qfunc_AB,
+                                data_split_alms_A[0], data_split_alms_A[1], data_split_alms_A[2], data_split_alms_A[3],
+                                sim_alms_B[0], sim_alms_B[1], sim_alms_B[2], sim_alms_B[3])
+            #replaces qbXXs
+            qCDs = split_K_func(qfunc_CD,
+                                data_split_alms_C[0], data_split_alms_C[1], data_split_alms_C[2], data_split_alms_C[3],
+                                sim_alms_D[0], sim_alms_D[1], sim_alms_D[2], sim_alms_D[3])
+            #replaces qaXsX
+            qAsB = split_K_func(qfunc_AB,
+                                sim_alms_A[0], sim_alms_A[1], sim_alms_A[2], sim_alms_A[3],
+                                data_split_alms_B[0], data_split_alms_B[1], data_split_alms_B[2], data_split_alms_B[3])
+            #replaces qbXsX
+            qCsD = split_K_func(qfunc_CD,
+                                sim_alms_C[0], sim_alms_C[1], sim_alms_C[2], sim_alms_C[3],
+                                data_split_alms_D[0], data_split_alms_D[1], data_split_alms_D[2], data_split_alms_D[3])
+
+            #qaXXs = split_K_func(Xdat,Xdat1,Xdat2,Xdat3,Xs,Xs1,Xs2,Xs3,qfunc1) #for the two split case, one would need two get_kmaps?, or instead returns an array of maps, [i] for split i
+            #qbXXs = split_K_func(Xdat,Xdat1,Xdat2,Xdat3,Xs,Xs1,Xs2,Xs3,qfunc2) if qfunc2 is not None else qaXXs 
+            #qaXsX = split_K_func(Xs,Xs1,Xs2,Xs3,Xdat,Xdat1,Xdat2,Xdat3,qfunc1) 
+            #qbXsX = split_K_func(Xs,Xs1,Xs2,Xs3,Xdat,Xdat1,Xdat2,Xdat3,qfunc2) if qfunc2 is not None else qaXsX
+            
+            #rdn0_only_term = power(qABs, qCDs)+ power(qABs, qCsD) + power(qAsB, qCDs) \
+            #        + power(qAsB, qCsD)
+            rdn0_only_term = power(qABs, qCDs) + power(qAsB, qCDs) + power(qAsB, qCsD) + power(qABs, qCsD)
+            
+        if verbose:
+            print("doing SS terms")
+        
+        #replaces qaXsXsp
+        qAsBsp = split_K_func(qfunc_AB,
+                              sim_alms_A[0], sim_alms_A[1], sim_alms_A[2], sim_alms_A[3],
+                              sim_alms_Bp[0], sim_alms_Bp[1], sim_alms_Bp[2], sim_alms_Bp[3])
+        #replaces qbXsXsp
+        qCsDsp = split_K_func(qfunc_CD,
+                              sim_alms_C[0], sim_alms_C[1], sim_alms_C[2], sim_alms_C[3],
+                              sim_alms_Dp[0], sim_alms_Dp[1], sim_alms_Dp[2], sim_alms_Dp[3])
+        #replaces qbXspXs
+        qCspDs = split_K_func(qfunc_CD,
+                              sim_alms_Cp[0], sim_alms_Cp[1], sim_alms_Cp[2], sim_alms_Cp[3],
+                              sim_alms_D[0], sim_alms_D[1], sim_alms_D[2], sim_alms_D[3])
+        
+        #qaXsXsp = split_K_func(Xs,Xs1,Xs2,Xs3,Xsp,Xsp1,Xsp2,Xsp3,qfunc1)
+        #qbXsXsp = split_K_func(Xs,Xs1,Xs2,Xs3,Xsp,Xsp1,Xsp2,Xsp3,qfunc2)
+        #qbXspXs = split_K_func(Xsp,Xsp1,Xsp2,Xsp3,Xs,Xs1,Xs2,Xs3,qfunc2)
+        #mcn0_term = (power(qaXsXsp,qbXsXsp) + power(qaXsXsp,qbXspXs))
+        mcn0_term = (power(qAsBsp, qCsDsp) + power(qAsBsp, qCspDs))
 
         mcn0evals.append(mcn0_term.copy())
         if not(skip_rd):  rdn0evals.append(rdn0_only_term - mcn0_term)
 
+    if verbose:
+        print("combining to get rdn0 and mcn0")
     if not(skip_rd):
         avgrdn0 = utils.allgatherv(rdn0evals,comm)
     else:
