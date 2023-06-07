@@ -283,8 +283,9 @@ def main():
         #These are the cases where we're using the same map in
         #each leg 
         if (freq_is_number or
-            (freq in ['hilc','hilc-tszd','hilc-cibd',
+            (freq in ['ilc', 'hilc','hilc-tszd','hilc-cibd',
                       'hilc-tszandcibd','freqcoadd'])
+            or (("_" not in freq) and freq.startswith("deproj"))
             or is_freq_diff):
             fg_alm_file = opj(map_dir, cmb_name,
                               "fg_nonoise_alms_%s.fits"%freq)
