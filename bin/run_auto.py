@@ -2,6 +2,9 @@
 #
 #
 from os.path import join as opj
+#import os
+#import sys
+#sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from ksz4.cross import four_split_K, split_phi_to_cl, mcrdn0_s4
 from ksz4.reconstruction import setup_recon, setup_ABCD_recon, get_cl_fg_smooth
 from pixell import curvedsky, enmap
@@ -14,6 +17,7 @@ import argparse
 from orphics import maps, mpi
 import numpy as np
 import pickle
+from string import Template
 
 disable_mpi = get_disable_mpi()
 if not disable_mpi:
@@ -21,8 +25,8 @@ if not disable_mpi:
     comm = mpi.MPI.COMM_WORLD
 
 NSPLIT=4
-MASK_PATH="/global/homes/m/maccrann/cmb/lensing/code/so-lenspipe/bin/planck/act_mask_20220316_GAL060_rms_70.00_d2.fits"
-DATA_DIR="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_modelsub_v1"
+#MASK_PATH="/global/homes/m/maccrann/cmb/lensing/code/so-lenspipe/bin/planck/act_mask_20220316_GAL060_rms_70.00_d2.fits"
+#DATA_DIR="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_modelsub_v1"
 
 #Read in kSZ alms
 ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("../tests/alms_4e3_2048_50_50_ksz.fits"),
@@ -30,7 +34,7 @@ ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("../tests/alms_4e3_2048_50_
 cl_rksz = get_cl_fg_smooth(ksz_alm)
 
 with open("../run_auto_defaults.yml",'rb') as f:
-    DEFAULTS=yaml.load(f)
+    DEFAULTS=yaml.safe_load(f)
 
 def get_config(description="Do 4pt measurement"):
     parser = argparse.ArgumentParser(description=description)
@@ -98,6 +102,22 @@ def get_config(description="Do 4pt measurement"):
     config_namespace = Namespace(**config)
     return config_namespace
 
+def get_alms_dr6(path_template, freqs=["90","150"], sim_seed=None, mlmax=None):
+    alms = {}
+    print(path_template)
+    for freq in freqs:
+        alms[freq] = []
+        for split in range(NSPLIT):
+            map_filename = Template(path_template).substitute(freq=freq, split=split)
+            alm = hp.read_alm(map_filename)
+            if mlmax is not None:
+                alm = utils.change_alm_lmax(alm, mlmax)
+            alms[freq].append(alm)
+            
+    return alms
+
+def sim_from_cl_1freq(cltot_dict
+
 def get_alms_dr6_hilc(data_dir="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v1",
                       map_names=["hilc", "hilc-tszandcibd"], sim_seed=None, mlmax=None):
 
@@ -134,7 +154,11 @@ def get_sim_alm_dr6_hilc(map_name, sim_seed, data_dir="/global/cscratch1/sd/macc
         alms.append(alm)
     return alms
 
-def get_data_Cltot_dict(alm_dict,
+def get_cl_model_from_data(alm_dict, sg_window=301, sg_order=2):
+    map_names = list(alm_dict.keys())
+    for 
+
+def get_data_Cltot_Nl_dict(alm_dict,
                    sg_window=301, sg_order=2,
                    w2=None):
     #just do a straight average of splits
@@ -173,7 +197,7 @@ def main():
     safe_mkdir(args.output_dir)
 
     #get w2 and w4
-    mask = enmap.read_map(MASK_PATH)
+    mask = enmap.read_map(args.mask)
     px = qe.pixelization(shape=mask.shape,wcs=mask.wcs)
     #w2 = maps.wfactor(2, mask)
     #w4 = maps.wfactor(4, mask)
@@ -186,8 +210,10 @@ def main():
     
     #read in alms for data
     est_maps = (args.est_maps.strip()).split("_")
-    data_alms = get_alms_dr6_hilc(mlmax=args.mlmax,
-                                  map_names=list(set(est_maps)))
+    data_alms = get_alms_dr6(args.data_template_path,
+                             freqs=list(set(est_maps)), mlmax=args.mlmax)
+    #data_alms = get_alms_dr6_hilc(mlmax=args.mlmax,
+    #                              map_names=list(set(est_maps)))
 
     #get total Cls...hmm - maybe easiest to
     #estimate these from input maps to start with,
@@ -291,16 +317,20 @@ def main():
 
         #K from Q(ilc,ilc)
         print("running K_CD")
-        Ks_cd = four_split_K(
-            setup["qfunc_K_CD"],
-            data_alms_Af[0], data_alms_Af[1],
-            data_alms_Af[2], data_alms_Af[3],
-            )
-        Ks_cd_lh = four_split_K(
-            setup["qfunc_K_CD_lh"],
-            data_alms_Af[0], data_alms_Af[1],
-            data_alms_Af[2], data_alms_Af[3],
-            )
+        if (est_maps[0],est_maps[1]) == (est_maps[2],est_maps[3]):
+            Ks_cd = Ks_ab
+            Ks_cd_lh = Ks_ab_lh
+        else:
+            Ks_cd = four_split_K(
+                setup["qfunc_K_CD"],
+                data_alms_Af[0], data_alms_Af[1],
+                data_alms_Af[2], data_alms_Af[3],
+                )
+            Ks_cd_lh = four_split_K(
+                setup["qfunc_K_CD_lh"],
+                data_alms_Af[0], data_alms_Af[1],
+                data_alms_Af[2], data_alms_Af[3],
+                )
 
         print("getting CL_KK")
         cl_abcd = split_phi_to_cl(Ks_ab, Ks_cd)
