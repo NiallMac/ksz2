@@ -18,3 +18,7 @@ use_mpi: False
 nsim_rdn0: 10
 data_template_path: "/home/r/rbond/jiaqu/scratch/DR6/maps/sims/ksz_4pt/coadd_data/kcoadd_f_${freq}_lmax7000_split${split}.fits"
 mask: /home/r/rbond/jiaqu/scratch/DR6/maps/sims/masks/dr6v2_default_union_mask.fits
+rksz_cl: sNone
+sg_window: 51
+sg_order: 2
+get_sims_from_data_cls: False
