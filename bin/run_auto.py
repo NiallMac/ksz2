@@ -1,8 +1,8 @@
 #Run the kSZ 4-point function
 #
 #
-from os.path import join as opj
-#import os
+from os.path import join as opj, dirname
+import os
 #import sys
 #sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from ksz4.cross import four_split_K, split_phi_to_cl, mcrdn0_s4
@@ -23,17 +23,20 @@ disable_mpi = get_disable_mpi()
 if not disable_mpi:
     from mpi4py import MPI
     comm = mpi.MPI.COMM_WORLD
+else:
+    comm = None
 
 NSPLIT=4
 #MASK_PATH="/global/homes/m/maccrann/cmb/lensing/code/so-lenspipe/bin/planck/act_mask_20220316_GAL060_rms_70.00_d2.fits"
 #DATA_DIR="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_modelsub_v1"
 
 #Read in kSZ alms
-ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("../tests/alms_4e3_2048_50_50_ksz.fits"),
-                                6000)
-cl_rksz = get_cl_fg_smooth(ksz_alm)
+#ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("../tests/alms_4e3_2048_50_50_ksz.fits"),
+#                                6000)
+#cl_rksz = get_cl_fg_smooth(ksz_alm)
+DEFAULT_CL_RKSZ=np.load(opj(dirname(__file__), "../tests/cl_4e3_2048_50_50_ksz.npy"))
 
-with open("../run_auto_defaults.yml",'rb') as f:
+with open(opj(dirname(__file__),"../run_auto_defaults.yml"),'rb') as f:
     DEFAULTS=yaml.safe_load(f)
 
 def get_config(description="Do 4pt measurement"):
@@ -116,8 +119,98 @@ def get_alms_dr6(path_template, freqs=["90","150"], sim_seed=None, mlmax=None):
             
     return alms
 
-def sim_from_cl_1freq(cltot_dict
+def get_sim_model_from_data(path_template, freqs=["90","150"], mlmax=None,
+                            nsplit=NSPLIT, sg_window=None, sg_order=2):
+    alms = {}
+    print(path_template)
+    for freq in freqs:
+        alms[freq] = []
+        for split in range(nsplit):
+            map_filename = Template(path_template).substitute(freq=freq, split=split)
+            alm = hp.read_alm(map_filename)
+            if mlmax is not None:
+                alm = utils.change_alm_lmax(alm, mlmax)
+            alms[freq].append(alm)
 
+    #we want noise spectra for each frequency (get this from diffs)
+    #and cross spectra for each frequency pair
+    cl_signal={}
+    cl_noise={}
+    for i,freq_i in enumerate(freqs):
+        for j,freq_j in enumerate(freqs[i:]):
+            #first signal
+            cl_signal[i,j]=[]
+            for p in range(nsplit):
+                for q in range(p,nsplit):
+                    if (i==j) and (p==q):
+                        continue
+                    cl_signal[i,j].append(
+                        curvedsky.alm2cl(alms[freq_i][p],
+                                         alms[freq_j][q])
+                        )
+            cl_signal[i,j] = (np.array(cl_signal[i,j]).mean(axis=0))
+            if sg_window is not None:
+                cl_signal[i,j] = savgol_filter(
+                    cl_signal[i,j], sg_window, sg_order)
+            #now noise
+            if i==j:
+                cl_diffs = []
+                for p in range(nsplit-1):
+                    for q in range(p+1,nsplit):
+                        cl_diffs.append(
+                            curvedsky.alm2cl(alms[freq_i][p]-alms[freq_i][q]
+                        ))
+                #noise cl is half of the diff cl
+                cl_noise[i] = 0.5 * (np.array(cl_diffs)).mean(axis=0)
+                if sg_window is not None:
+                    cl_noise[i] = savgol_filter(
+                        cl_noise[i], sg_window, sg_order)
+    return cl_signal, cl_noise
+
+def get_sims_from_cls(cl_signal_dict, cl_noise_dict,
+                      signal_seed, noise_seed, mlmax=None):
+    
+    channel_pairs = cl_signal_dict.keys()
+    channels = []
+    for p in channel_pairs:
+        channels += list(p)
+    channels = list(set(channels))
+
+    #make covariance - should be NxN where N=len(channels)*mlmax
+    N = len(channels)*mlmax
+    signal_cov = np.zeros((N,N,mlmax+1))
+    for i,c_i in enumerate(channels):
+        for j,c_j in enumerate(channels[i:]):
+            if (c_i, c_j) in cl_signal_dict:
+                cl_ij = cl_signal_dict[c_i,c_j]
+            else:
+                cl_ij = cl_signal_dict[c_j,c_i]
+            if mlmax is not None:
+                cl_ij = cl_ij[:mlmax+1]
+            signal_cov[i,j,:] = cl_ij
+            signal_cov[j,i,:] = cl_ij
+
+    #Now can generate signal alms
+    signal_alms = curvedsky.rand_alm(signal_cov, seed=signal_seed)
+    signal_alm_dict = {}
+    for i in range(len(signal_alms)):
+        signal_alm_dict[channels[i]] = signal_alms[i]
+
+    #now generate noise - should be independent
+    noise_alms = {}
+    for c in channels:
+        noise_cov = np.zeros((nsplt, nsplit, mlmax+1))
+        for i in range(nsplit):
+            noise_cov[i*(mlmax+1) : (i+1)*(mlmax+1)] = cl_noise_dict[c][:mlmax+1]
+        noise_alms = curvedsky.rand_alm(noise_cov, seed=noise_seed)
+
+    total_alms = []
+    for s,n in zip(signal_alms, noise_alms):
+        total_alms.append(s+n)
+
+    return total_alms, signal_alms, noise_alms
+    
+  
 def get_alms_dr6_hilc(data_dir="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v1",
                       map_names=["hilc", "hilc-tszandcibd"], sim_seed=None, mlmax=None):
 
@@ -156,9 +249,9 @@ def get_sim_alm_dr6_hilc(map_name, sim_seed, data_dir="/global/cscratch1/sd/macc
 
 def get_cl_model_from_data(alm_dict, sg_window=301, sg_order=2):
     map_names = list(alm_dict.keys())
-    for 
+    return 
 
-def get_data_Cltot_Nl_dict(alm_dict,
+def get_data_Cltot_dict(alm_dict,
                    sg_window=301, sg_order=2,
                    w2=None):
     #just do a straight average of splits
@@ -186,6 +279,7 @@ def main():
         comm = MPI.COMM_WORLD
         rank,size = comm.Get_rank(), comm.Get_size()
     else:
+        comm = None
         rank,size = 0,1
     
     #get args
@@ -196,6 +290,12 @@ def main():
     recon_config = vars(args)
     safe_mkdir(args.output_dir)
 
+    #signal filter
+    if args.rksz_cl is None:
+        cl_rksz = DEFAULT_CL_RKSZ
+    else:
+        cl_rksz = np.load(args.rksz_cl)
+    
     #get w2 and w4
     mask = enmap.read_map(args.mask)
     px = qe.pixelization(shape=mask.shape,wcs=mask.wcs)
@@ -209,6 +309,8 @@ def main():
 
     
     #read in alms for data
+    if rank==0:
+        print("reading data alms")
     est_maps = (args.est_maps.strip()).split("_")
     data_alms = get_alms_dr6(args.data_template_path,
                              freqs=list(set(est_maps)), mlmax=args.mlmax)
@@ -219,6 +321,8 @@ def main():
     #estimate these from input maps to start with,
     #but also add an estimate from sims option
     if args.total_Cl_from_data:
+        if rank==0:
+            print("getting data Cls")
         #get from data
         cltot_dict = get_data_Cltot_dict(data_alms,
                    sg_window=301, sg_order=2,
@@ -230,7 +334,7 @@ def main():
     else:
         pass
         #get from sims
-    
+
     #do setup
     #decide on lmin, lmax etc.
     #and what combination of maps to use
@@ -256,7 +360,8 @@ def main():
     cltot_Y = cltot_dict[("hilc-tszandcibd", "hilc-tszandcibd")][:mlmax+1]
     cltot_XY = cltot_dict[("hilc", "hilc-tszandcibd")][:mlmax+1]
     """
-
+    if rank==0:
+        print("Setting up estimator")
     px = qe.pixelization(shape=mask.shape,wcs=mask.wcs)
     setup = setup_ABCD_recon(
         px, lmin, lmax, mlmax,
@@ -273,6 +378,8 @@ def main():
     
     #run some measurements
     #filter
+    if rank==0:
+        print("filtering data alms")
     data_alms_Af = [setup["filter_A"](
         data_alms[est_maps[0]][split])
                     for split in range(NSPLIT)]
@@ -293,7 +400,7 @@ def main():
     data_alms_Df = data_alms_Af
 
 
-    def run_ClKK():
+    def run_ClKK(comm=None):
         #K from Q(ilc, ilc-tszandcibd)
         print("running K_AB")
         Ks_ab = four_split_K(
@@ -342,33 +449,58 @@ def main():
         print("done")
 
     if args.do_auto:
-        cl_iici, cl_iici_lh = run_ClKK()
-        outputs = {}
-        outputs["cl_KK_raw"] = cl_iici
-        outputs["cl_KK_lh_raw"] = cl_iici_lh
-        outputs["N0"] = setup["N0_ABCD_K"]
-        outputs["N0_lh"] = setup["N0_ABCD_K_lh"]
-        #save pkl
-        with open(opj(args.output_dir, "auto_outputs.pkl"), 'wb') as f:
-            pickle.dump(outputs, f)
+        cl_iici, cl_iici_lh = run_ClKK(comm=comm)
+        if rank==0:
+            outputs = {}
+            outputs["cl_KK_raw"] = cl_iici
+            outputs["cl_KK_lh_raw"] = cl_iici_lh
+            outputs["N0"] = setup["N0_ABCD_K"]
+            outputs["N0_lh"] = setup["N0_ABCD_K_lh"]
+            #save pkl
+            with open(opj(args.output_dir, "auto_outputs.pkl"), 'wb') as f:
+                pickle.dump(outputs, f)
 
             
     def run_rdn0(setup, nsim, use_mpi=False,
                  est=None):
-        #get sim alm functions
-        def get_sim_alms_A(i):
-            alms = get_sim_alm_dr6_hilc(
-                est_maps[0], (200+i,0,i+1),
-                data_dir=DATA_DIR, mlmax=mlmax)
-            alms_f = [setup["filter_A"](alm) for alm in alms]
-            return alms_f
+        if args.get_sims_from_data_cls:
+            print("getting data C_ls for sims")
+            print("mlmax = %d"%mlmax)
+            data_cl_signal_dict, data_cl_noise_dict = get_sim_model_from_data(
+                args.data_template_path, freqs=list(set(est_maps)),
+                mlmax=args.mlmax, nsplit=NSPLIT, sg_window=args.sg_window, sg_order=args.sg_order)
+            
+            def get_sim_alms_A(i):
+                print("getting sims A %d"%i)
+                alms,_,_ = get_sims_from_cls(
+                    data_cl_signal_dict, data_cl_noise_dict,
+                    i, nsim*i*4, mlmax=mlmax)[est_maps[0]]
+                print("len(alms)",len(alms))
+                alms_f = [setup["filter_A"](alm) for alm in alms]
+                return alms_f
 
-        def get_sim_alms_B(i):
-            alms = get_sim_alm_dr6_hilc(
-                est_maps[1], (200+i,0,i+1),
-                data_dir=DATA_DIR, mlmax=mlmax)
-            alms_f = [setup["filter_B"](alm) for alm in alms]
-            return alms_f
+            def get_sim_alms_B(i):
+                alms,_,_ = get_sims_from_cls(
+                    data_cl_signal_dict, data_cl_noise_dict,
+                    i, nsim*i*4, mlmax=mlmax)[est_maps[1]]
+                alms_f = [setup["filter_B"](alm) for alm in alms]
+                return alms_f
+
+        else:
+            #get sim alm functions
+            def get_sim_alms_A(i):
+                alms = get_sim_alm_dr6_hilc(
+                    est_maps[0], (200+i,0,i+1),
+                    data_dir=DATA_DIR, mlmax=mlmax)
+                alms_f = [setup["filter_A"](alm) for alm in alms]
+                return alms_f
+
+            def get_sim_alms_B(i):
+                alms = get_sim_alm_dr6_hilc(
+                    est_maps[1], (200+i,0,i+1),
+                    data_dir=DATA_DIR, mlmax=mlmax)
+                alms_f = [setup["filter_B"](alm) for alm in alms]
+                return alms_f
 
         if est_maps[2]==est_maps[0]:
             get_sim_alms_C = None
@@ -410,6 +542,8 @@ def main():
         return rdn0, mcn0
 
     if args.do_rdn0:
+        if rank==0:
+            print("running rdn0")
         rdn0, mcn0 = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi)
         outputs = {}
         outputs["rdn0"] = rdn0
