@@ -4,7 +4,9 @@ from orphics import mpi
 from pixell import utils
 from pixell.mpi import FakeCommunicator
 
-def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xdatp_2=None,Xdatp_3=None):
+def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xdatp_2=None,Xdatp_3=None,
+                 comm=None):
+    nsplit=4
     """Return kappa_alms combinations required for the 4cross estimator.
     Args:
         Xdat_0 (array): [fTalm,fEalm,fBalm] list of filtered alms from split 0
@@ -20,7 +22,9 @@ def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xd
     Returns:
         array: Combination of reconstructed kappa alms
     """
-    if Xdatp_0 is None:        
+    if Xdatp_0 is None:
+        Xdatp_0 = Xdat_0
+    """
         phi_xy00 = (qfunc(Xdat_0,Xdat_0))
         phi_xy11 = (qfunc(Xdat_1,Xdat_1))
         phi_xy22 = (qfunc(Xdat_2,Xdat_2))
@@ -28,12 +32,13 @@ def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xd
         phi_xy01 = 0.5*((qfunc(Xdat_0,Xdat_1))+(qfunc(Xdat_1,Xdat_0)))
         phi_xy02 = 0.5*((qfunc(Xdat_0,Xdat_2))+(qfunc(Xdat_2,Xdat_0)))
         phi_xy03 = 0.5*((qfunc(Xdat_0,Xdat_3))+(qfunc(Xdat_3,Xdat_0)))
-        phi_xy10=phi_xy01
-        phi_xy12= 0.5*((qfunc(Xdat_1,Xdat_2))+(qfunc(Xdat_2,Xdat_1)))
-        phi_xy13= 0.5*((qfunc(Xdat_1,Xdat_3))+(qfunc(Xdat_3,Xdat_1)))
+        phi_xy12 = 0.5*((qfunc(Xdat_1,Xdat_2))+(qfunc(Xdat_2,Xdat_1)))
+        phi_xy13 = 0.5*((qfunc(Xdat_1,Xdat_3))+(qfunc(Xdat_3,Xdat_1)))
+        phi_xy23 = 0.5*((qfunc(Xdat_2,Xdat_3))+(qfunc(Xdat_3,Xdat_2)))
+
         phi_xy20=phi_xy02
         phi_xy21=phi_xy12
-        phi_xy23=0.5*((qfunc(Xdat_2,Xdat_3))+(qfunc(Xdat_3,Xdat_2)))
+        phi_xy10=phi_xy01
         phi_xy30=phi_xy03
         phi_xy31=phi_xy13
         phi_xy32=phi_xy23
@@ -49,20 +54,61 @@ def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xd
         phi_xy_x3=phi_xy3-phi_xy33/4
     
     else:
-       
-        phi_xy00 = (qfunc(Xdat_0,Xdatp_0))
-        phi_xy11 = (qfunc(Xdat_1,Xdatp_1))
-        phi_xy22 = (qfunc(Xdat_2,Xdatp_2))
-        phi_xy33 = (qfunc(Xdat_3,Xdatp_3))
-        phi_xy01 = 0.5*((qfunc(Xdat_0,Xdatp_1))+(qfunc(Xdat_1,Xdatp_0)))
-        phi_xy02 = 0.5*((qfunc(Xdat_0,Xdatp_2))+(qfunc(Xdat_2,Xdatp_0)))
-        phi_xy03 = 0.5*((qfunc(Xdat_0,Xdatp_3))+(qfunc(Xdat_3,Xdatp_0)))
+    """
+    #should be able to parallelize these a bit
+    if comm is not None:
+        rank,size = comm.Get_rank(), comm.Get_size()
+    else:
+        rank,size = 0,1
+
+    phis = {}
+    k=0
+    Xdats = [Xdat_0, Xdat_1, Xdat_2, Xdat_3]
+    Xdatps =  [Xdatp_0, Xdatp_1, Xdatp_2, Xdatp_3]
+    for i in range(nsplit):
+        for j in range(nsplit):
+            if k%size != rank:
+                continue
+            phis[i,j] = qfunc(Xdats[i], Xdatps[j])
+            if comm is not None:
+                if rank==0:
+                    num_received = 1
+                    while num_received<size:
+                        phis_recv = comm.recv(source=MPI.ANY_SOURCE)
+                        for key in phis_recv:
+                            phis[key] = phis_recv[key]
+                        num_received+=1
+                        
+                else:
+                    comm.send(phis,0)
+    """
+    phi_xy00 = (qfunc(Xdat_0,Xdatp_0))
+    phi_xy11 = (qfunc(Xdat_1,Xdatp_1))
+    phi_xy22 = (qfunc(Xdat_2,Xdatp_2))
+    phi_xy33 = (qfunc(Xdat_3,Xdatp_3))
+    phi_xy01 = 0.5*((qfunc(Xdat_0,Xdatp_1))+(qfunc(Xdat_1,Xdatp_0)))
+    phi_xy02 = 0.5*((qfunc(Xdat_0,Xdatp_2))+(qfunc(Xdat_2,Xdatp_0)))
+    phi_xy03 = 0.5*((qfunc(Xdat_0,Xdatp_3))+(qfunc(Xdat_3,Xdatp_0)))
+    phi_xy12 = 0.5*((qfunc(Xdat_1,Xdatp_2))+(qfunc(Xdat_2,Xdatp_1)))
+    phi_xy13 = 0.5*((qfunc(Xdat_1,Xdatp_3))+(qfunc(Xdat_3,Xdatp_1)))
+    phi_xy23 = 0.5*((qfunc(Xdat_2,Xdatp_3))+(qfunc(Xdat_3,Xdatp_2)))
+    """
+    if rank==0:
+        phi_xy00 = phis[0,0]
+        phi_xy11 = phis[1,1]
+        phi_xy22 = phis[2,2]
+        phi_xy33 = phis[3,3]
+        phi_xy01 = 0.5*(phis[0,1] + phis[1,0])
+        phi_xy02 = 0.5*(phis[0,2] + phis[2,0])
+        phi_xy03 = 0.5*(phis[0,3] + phis[3,0])
+        phi_xy12 = 0.5*(phis[1,2] + phis[2,1])
+        phi_xy13 = 0.5*(phis[1,3] + phis[3,1])
+        phi_xy23 = 0.5*(phis[2,3] + phis[3,2])
+
+
         phi_xy10=phi_xy01
-        phi_xy12= 0.5*((qfunc(Xdat_1,Xdatp_2))+(qfunc(Xdat_2,Xdatp_1)))
-        phi_xy13= 0.5*((qfunc(Xdat_1,Xdatp_3))+(qfunc(Xdat_3,Xdatp_1)))
         phi_xy20=phi_xy02
         phi_xy21=phi_xy12
-        phi_xy23=0.5*((qfunc(Xdat_2,Xdatp_3))+(qfunc(Xdat_3,Xdatp_2)))
         phi_xy30=phi_xy03
         phi_xy31=phi_xy13
         phi_xy32=phi_xy23
@@ -77,10 +123,11 @@ def four_split_K(qfunc, Xdat_0,Xdat_1,Xdat_2,Xdat_3,Xdatp_0=None,Xdatp_1=None,Xd
         phi_xy_x2=phi_xy2-phi_xy22/4
         phi_xy_x3=phi_xy3-phi_xy33/4
 
-    phi_xy=np.array([phi_xy_X,phi_xy01,phi_xy02,phi_xy03,phi_xy12,phi_xy13,phi_xy23,phi_xy_x0,phi_xy_x1,phi_xy_x2,phi_xy_x3])
-    
+        phi_xy=np.array([phi_xy_X,phi_xy01,phi_xy02,phi_xy03,phi_xy12,phi_xy13,phi_xy23,phi_xy_x0,phi_xy_x1,phi_xy_x2,phi_xy_x3])
 
-    return phi_xy
+        return phi_xy
+    else:
+        return None
 
 def split_phi_to_cl(xy,uv,m=4,cross=False,ikalm=None):
     """Obtain 4cross spectra from combinations of kappa_alms build from splits

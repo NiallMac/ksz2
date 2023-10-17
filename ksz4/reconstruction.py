@@ -467,6 +467,7 @@ def setup_recon(px, lmin, lmax, mlmax,
             lmin, lmax, k_ellmax=mlmax,
             profile=profile)['src']
         norm_K[0]=0.
+        norm_qtt_asym
         outputs["norm_K"] = norm_K
 
         #The Smith and Ferraro estimator Ksf differs
@@ -478,8 +479,8 @@ def setup_recon(px, lmin, lmax, mlmax,
 
         #For the normalized estimator this
         #is also the N0.
-        N0_K = norm_K
-        outputs["N0_K"] = N0_K
+        N0_K = norm_K / profile**2
+        outputs["N0_K"] = N0_K 
         
         #otherwise, it is
         N0_K_nonorm = 1./norm_K

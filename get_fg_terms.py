@@ -395,6 +395,11 @@ def main():
                 cltot_XY = (cltot_XY[:recon_config["mlmax"]+1] +
                             cl_rksz[:recon_config["mlmax"]+1])
 
+            if not recon_config["include_fg_power_in_filter"]:
+                cltot_X -= cltot_data["Clfg_%s"%freqX]
+                cltot_Y -= cltot_data["Clfg_%s"%freqY]
+                cltot_XY -= cltot_data["Clfg_%s_%s"%(freqX, freqY)]
+                
             Nl_tt_X = cltot_data["Nltt_%s"%freqX][:recon_config["mlmax"]+1]
             if "Nlee_%s"%freqX in cltot_data.dtype.names:
                 Nl_ee_X = cltot_data["Nlee_%s"%cltot_pol_label_X][:recon_config["mlmax"]+1]
@@ -513,14 +518,24 @@ def main():
             cltot_B = cltot_data["Cltt_total_%s"%freqB][:recon_config["mlmax"]+1] + add_rksz
             cltot_C = cltot_data["Cltt_total_%s"%freqC][:recon_config["mlmax"]+1] + add_rksz
             cltot_D = cltot_data["Cltt_total_%s"%freqD][:recon_config["mlmax"]+1] + add_rksz
+
+            if not recon_config["include_fg_power_in_filter"]:
+                cltot_A -= cltot_data["Cltt_total_%s"%freqA][:recon_config["mlmax"]+1]
+                cltot_B -= cltot_data["Cltt_total_%s"%freqB][:recon_config["mlmax"]+1]
+                cltot_C -= cltot_data["Cltt_total_%s"%freqC][:recon_config["mlmax"]+1]
+                cltot_D -= cltot_data["Cltt_total_%s"%freqD][:recon_config["mlmax"]+1]
+
             
             def get_cl_tot_12(freq1, freq2):
                 key = "Cltt_total_%s_%s"%(freq1, freq2) if (freq1!=freq2) else "Cltt_total_%s"%freq1
-                try:
-                    return cltot_data[key][:recon_config["mlmax"]+1] + add_rksz
-                except ValueError:
+                if key not in cltot_data:
                     key = "Cltt_total_%s_%s"%(freq2, freq1) if (freq1!=freq2) else "Cltt_total_%s"%freq1
-                    return cltot_data[key][:recon_config["mlmax"]+1] + add_rksz
+                cl = cltot_data[key][:recon_config["mlmax"]+1]
+                if recon_config["add_rkszcl_to_filter"]:
+                    cl += add_rksz
+                if not recon_config["include_fg_power_in_filter"]:
+                    cl -= cltot_data[key.replace("tt_total","fg")][:recon_config["mlmax"]+1]
+                return cl
 
             cltot_AC = get_cl_tot_12(freqA, freqC)
             cltot_BD = get_cl_tot_12(freqB, freqD)
@@ -631,6 +646,45 @@ def main():
                 cl_K_ksz = cl_K_ksz_raw - ksz_N0
                 outputs["cl_K_ksz"] = cl_K_ksz 
 
+                
+            #mean-field?
+            if args.do_meanfield:
+                meanfield_data = []
+                cov_fg_power = np.zeros((4,4,mlmax+1))
+                cov_fg_power[0,0,:] = cltot_A
+                cov_fg_power[0,1,:] = cltot_AB
+                cov_fg_power[1,0,:] = cltot_AB
+                cov_fg_power[0,2,:] = cltot_AC
+                cov_fg_power[2,0,:] = cltot_AC
+                cov_fg_power[0,3,:] = cltot_AD
+                cov_fg_power[3,0,:] = cltot_AD
+                cov_fg_power[1,1,:] = cltot_B
+                cov_fg_power[1,2,:] = cltot_BC
+                cov_fg_power[2,1,:] = cltot_BC
+                cov_fg_power[2,2,:] = cltot_C
+                cov_fg_power[2,3,:] = cltot_CD
+                cov_fg_power[3,2,:] = cltot_CD
+                cov_fg_power[3,3,:] = cltot_D
+                for isim in range(args.nsim_meanfield):
+                    #generate cls
+                    fg_alms = curvedsky.rand_alm(cov_fg_power, seed=123+isim)
+                    fg_alms_filtered = []
+                    for iX,X in enumerate(["A","B","C","D"]):
+                        fg_alms_filtered.append(
+                        recon_config["filter_%s"%X](fg_alms[iX])
+                        )
+                KKi = curvedsky.alm2cl(
+                    recon_stuff["qfunc_K_AB"](fg_alms_filtered[0],fg_alms_filtered[1]),
+                    recon_stuff["qfunc_K_CD"](fg_alms_filtered[2],fg_alms_filtered[3]),
+                )
+                #mask
+                mask_hpix = 
+                
+                meanfield_data.append(KKi)
+            
+
+                
+                
             output_data = np.zeros((recon_config["mlmax"]+1),
                                    dtype=[(k,float) for k in outputs.keys()])
             for k,v in outputs.items():
@@ -653,6 +707,9 @@ def main():
             tcls['TT'] = cltot_data["Cltt_total_%s"%freq][:recon_config["mlmax"]+1]
             if recon_config["add_rkszcl_to_filter"]:
                 tcls["TT"] += cl_rksz
+            if not recon_config["include_fg_power_in_filter"]:
+                print("removing fg power from filters")
+                tcls["TT"] -= cltot_data["Clfg_%s"%freq][:recon_config["mlmax"]+1]
 
             lmin,lmax=recon_config["K_lmin"], recon_config["K_lmax"]
             recon_stuff = setup_recon(
