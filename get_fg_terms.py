@@ -38,7 +38,7 @@ def get_cl_fg_smooth(alms, alm2=None):
     l = np.arange(len(cl))
     d = l*(l+1)*cl
     #smooth with savgol
-    d_smooth = savgol_filter(d, 5, 2)
+    d_smooth = savgol_filter(d, 301, 2)
     #if there's still negative values, set them
     #to zero
     d_smooth[d_smooth<0.] = 0.
@@ -440,13 +440,16 @@ def main():
                     ("lh", recon_stuff["qfunc_K_lh"])
                     )
 
+                """
                 deltaK_phi = curvedsky.almxfl(
                         phi_alms, recon_stuff["norm_K_XY"] * recon_stuff["R_K_phi"]
                     )
                 cl_phiphi = curvedsky.alm2cl(deltaK_phi)
+                """
 
             cmb_name = recon_config['cmb_name']
             outputs = OrderedDict()
+            outputs["profile"] = profile
 
             fg_alms_filtered_X = recon_stuff["filter_X"](fg_alms[0])
             fg_alms_filtered_Y = recon_stuff["filter_Y"](fg_alms[1])
@@ -528,7 +531,7 @@ def main():
             
             def get_cl_tot_12(freq1, freq2):
                 key = "Cltt_total_%s_%s"%(freq1, freq2) if (freq1!=freq2) else "Cltt_total_%s"%freq1
-                if key not in cltot_data:
+                if key not in cltot_data.dtype.names:
                     key = "Cltt_total_%s_%s"%(freq2, freq1) if (freq1!=freq2) else "Cltt_total_%s"%freq1
                 cl = cltot_data[key][:recon_config["mlmax"]+1]
                 if recon_config["add_rkszcl_to_filter"]:
@@ -568,31 +571,32 @@ def main():
                 cltot_C, cltot_D,
                 cltot_AC, cltot_BD,
                 cltot_AD, cltot_BC,
-                do_lh=False, do_psh=False)
+                do_lh=args.do_lh, do_psh=args.do_psh)
 
             profile = recon_stuff['profile']
             qfuncs = [("qe", (recon_stuff["qfunc_K_AB"], recon_stuff["qfunc_K_CD"]))]
             if args.do_psh:
-                raise NotImplementedError(
-                    "not implemented assymetric with bias hardening")
+                #raise NotImplementedError(
+                #    "not implemented assymetric with bias hardening")
                 qfuncs.append(
-                    ("psh", recon_stuff["qfunc_K_psh"])
+                    ("psh", (recon_stuff["qfunc_K_AB_psh"], recon_stuff["qfunc_K_CD_psh"]))
                     )
             if args.do_lh:
-                raise NotImplementedError(
-                    "not implemented assymetric with lensing hardening"
-                    )
+                #raise NotImplementedError(
+                #    "not implemented assymetric with lensing hardening")
                 qfuncs.append(
-                    ("lh", recon_stuff["qfunc_K_lh"])
+                    ("lh", (recon_stuff["qfunc_K_AB_lh"], recon_stuff["qfunc_K_CD_lh"]))
                     )
-
+                """
                 deltaK_phi = curvedsky.almxfl(
                         phi_alms, recon_stuff["norm_K_XY"] * recon_stuff["R_K_phi"]
                     )
                 cl_phiphi = curvedsky.alm2cl(deltaK_phi)
+                """
 
             cmb_name = recon_config['cmb_name']
             outputs = OrderedDict()
+            outputs["profile"] = profile
 
             fg_alms_filtered_A = recon_stuff["filter_A"](fg_alms[0])
             fg_alms_filtered_B = recon_stuff["filter_B"](fg_alms[1])
@@ -609,14 +613,14 @@ def main():
 
             
             if args.do_lh:
-                outputs["N0_K_lh"] = recon_stuff["N0_XYXY_K_lh"]
-                jobs += [("psh", recon_stuff["qfunc_K_XY_lh"],
-                          recon_stuff["get_fg_trispectrum_N0_XYXY_lh"])
+                outputs["N0_K_lh"] = recon_stuff["N0_ABCD_K_lh"]
+                jobs += [("lh", (recon_stuff["qfunc_K_AB_lh"], recon_stuff["qfunc_K_CD_lh"]),
+                          recon_stuff["get_fg_trispectrum_N0_ABCD_lh"])
                          ]
             if args.do_psh:
-                outputs["N0_K_psh"] = recon_stuff["N0_XYXY_K_psh"]
-                jobs += [("lh", recon_stuff["qfunc_K_XY_psh"],
-                          recon_stuff["get_fg_trispectrum_N0_XYXY_psh"])
+                outputs["N0_K_psh"] = recon_stuff["N0_ABCD_K_psh"]
+                jobs += [("psh", (recon_stuff["qfunc_K_AB_psh"], recon_stuff["qfunc_K_CD_psh"]),
+                          recon_stuff["get_fg_trispectrum_N0_ABCD_psh"])
                          ]
 
             #We'll also want to do the ksz-only case
@@ -645,9 +649,10 @@ def main():
                 ksz_N0 = get_tri_N0(cl_rksz, cl_rksz, cl_rksz, cl_rksz)
                 cl_K_ksz = cl_K_ksz_raw - ksz_N0
                 outputs["cl_K_ksz"] = cl_K_ksz 
-
+                
                 
             #mean-field?
+            """
             if args.do_meanfield:
                 meanfield_data = []
                 cov_fg_power = np.zeros((4,4,mlmax+1))
@@ -681,6 +686,7 @@ def main():
                 mask_hpix = 
                 
                 meanfield_data.append(KKi)
+            """
             
 
                 
@@ -746,6 +752,7 @@ def main():
 
             cmb_name = recon_config['cmb_name']
             outputs = OrderedDict()
+            outputs["profile"] = profile
             outputs['cl_KphiKphi'] = cl_phiphi
 
 
