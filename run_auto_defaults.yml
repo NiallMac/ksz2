@@ -11,6 +11,7 @@ rksz_profile_file: sNone
 #profile_file: sNone #file with profile
 do_qe: True
 do_lh: True
+do_psh: True
 total_Cl_from_data: True
 est_maps: hilc_hilc-tszandcibd_hilc_hilc
 do_rdn0: False
@@ -33,3 +34,4 @@ combine_with_auto: False
 fg_power_data: sNone
 meanfield_tag: sNone
 apply_extra_mask: sNone
+ksz_theory_alm_file: sNone

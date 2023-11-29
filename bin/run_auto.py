@@ -41,7 +41,74 @@ DEFAULT_CL_RKSZ=np.load(opj(dirname(__file__), "../tests/cl_4e3_2048_50_50_ksz.n
 with open(opj(dirname(__file__),"../run_auto_defaults.yml"),'rb') as f:
     DEFAULTS=yaml.safe_load(f)
 
-def get_config(description="Do 4pt measurement"):
+def get_config(defaults=DEFAULTS,
+               description="Do 4pt measurement"):
+    parser = argparse.ArgumentParser(description='Prepare Planck alms')
+    #only required arg is output_dir
+    parser.add_argument("output_dir", type=str)
+    #can also add a config file
+    parser.add_argument("-c", "--config_file", type=str, default=None)
+    #and otherwise variables are set to defaults,
+    #or overwritten on command line
+    updated_defaults = {}
+    for key,val in defaults.items():
+        nargs=None
+        if val=="iNone":
+            t,val = int, None
+        elif val=="fNone":
+            t,val = float, None
+        elif val=="sNone":
+            t,val = str, None
+        elif val=="liNone":
+            t,val,nargs = int,None,'*'
+        elif val=="lfNone":
+            t,val,nargs = float,None,'*'
+        elif val=="lsNone":
+            t,val,nargs = str,None,'*'
+        elif isinstance(val, list):
+            t = type(val[0])
+            nargs='*'
+        else:
+            t = type(val)
+        updated_defaults[key] = val
+        parser.add_argument("--%s"%key, type=t, nargs=nargs)
+        
+    #This parser will have optional arguments set to
+    #None if not set. So if that's the case, replace
+    #with the default value
+    args_dict=vars(parser.parse_args())
+    config_file = args_dict.pop("config_file")
+    output_dir = args_dict.pop("output_dir")
+
+    config = {}
+    if config_file is None:
+        config_from_file = {}
+    else:
+        with open(config_file,"rb") as f:
+            config_from_file = yaml.load(f)
+        config.update(config_from_file)
+        
+    config['output_dir'] = output_dir
+
+    for key,val in args_dict.items():
+        if key in config:
+            if val is not None:
+                config[key] = val
+        else:
+            if val is not None:
+                config[key] = val
+            else:                
+                config[key] = updated_defaults[key]
+    #I think most convenient to return
+    #a namespace
+    from argparse import Namespace
+    config_namespace = Namespace(**config)
+
+    #also return the config from the file,
+    #and the defaults
+    return config_namespace, config_from_file, dict(DEFAULTS)
+    
+def get_config_old(description="Do 4pt measurement"):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("output_dir", type=str)
 
@@ -405,6 +472,9 @@ def get_sim_alm_dr6_hilc(map_name, sim_seed, sim_template_path, mlmax=None,
     alms=[]
     for f in alm_filenames:
         alm=hp.read_alm(f)
+        if mlmax is not None:
+            print("apply mlmax cut *before* masking - this is probably the wrong thing to do, but avoids memory issues")
+            alm = utils.change_alm_lmax(alm, mlmax)
         lmax = hp.Alm.getlmax(len(alm))
         if apply_extra_mask is not None:
             print("applying extra mask")
@@ -456,11 +526,12 @@ def main():
         rank,size = 0,1
     
     #get args
-    args = get_config()
+    args,_,_ = get_config()
     if rank==0:
         print("args:")
         print(args)
-    recon_config = vars(args)
+    
+    #recon_config = vars(args)
     safe_mkdir(args.output_dir)
 
     #signal filter
@@ -529,10 +600,10 @@ def main():
     #decide on lmin, lmax etc.
     #and what combination of maps to use
     #est_maps = recon_config["est_maps"]
-    lmin, lmax = recon_config["K_lmin"], recon_config["K_lmax"]
+    lmin, lmax = args.K_lmin, args.K_lmax
 
     n_alm = len( data_alms[ list(data_alms.keys())[0] ][0] )
-    if recon_config["mlmax"] is None:
+    if args.mlmax is None:
         mlmax = hp.Alm.getlmax(n_alm)
         args.mlmax = mlmax
     else:
@@ -575,24 +646,29 @@ def main():
     if rank==0:
         print("Setting up estimator")
     px = qe.pixelization(shape=mask.shape,wcs=mask.wcs)
+    
+    cltot_A = cltot_dict[(est_maps[0], est_maps[0])][:mlmax+1]
+    cltot_B = cltot_dict[(est_maps[1], est_maps[1])][:mlmax+1]
+    cltot_C = cltot_dict[(est_maps[2], est_maps[2])][:mlmax+1]
+    cltot_D = cltot_dict[(est_maps[3], est_maps[3])][:mlmax+1]
+    cltot_AC = cltot_dict[(est_maps[0], est_maps[2])][:mlmax+1]
+    cltot_BD = cltot_dict[(est_maps[1], est_maps[3])][:mlmax+1]
+    cltot_AD = cltot_dict[(est_maps[0], est_maps[3])][:mlmax+1]
+    cltot_BC = cltot_dict[(est_maps[1], est_maps[2])][:mlmax+1]
+    
     setup = setup_ABCD_recon(
         px, lmin, lmax, mlmax,
         cl_rksz[:mlmax+1], 
-        cltot_dict[(est_maps[0], est_maps[0])][:mlmax+1], #cltot_A
-        cltot_dict[(est_maps[1], est_maps[1])][:mlmax+1], #cltot_B
-        cltot_dict[(est_maps[2], est_maps[2])][:mlmax+1], #cltot_C
-        cltot_dict[(est_maps[3], est_maps[3])][:mlmax+1], #cltot_D
-        cltot_dict[(est_maps[0], est_maps[2])][:mlmax+1], #cltot_AC
-        cltot_dict[(est_maps[1], est_maps[3])][:mlmax+1], #cltot_BD
-        cltot_dict[(est_maps[0], est_maps[3])][:mlmax+1], #cltot_AD
-        cltot_dict[(est_maps[1], est_maps[2])][:mlmax+1],#cltot_BC
-        do_lh=True, do_psh=False)
+        cltot_A, cltot_B, cltot_C, cltot_D,
+        cltot_AC, cltot_BD, cltot_AD, cltot_BC,
+        do_lh=True, do_psh=True)
+    profile = setup["profile"]
+    print("filter_A:",profile/cltot_A)
 
     #also get noiseless N0 - for split estimator, true N0 should
     #be somewhere in between? Use signal only Cl (and here we
     #should divide by w4 - didn't need to before to just generate
     #gaussian alms)
-    profile = cl_rksz**0.5
     wLK_A = profile[:lmax+1]/(cltot_dict[(est_maps[0], est_maps[0])][:lmax+1])
     wLK_C = profile[:lmax+1]/(cltot_dict[(est_maps[2], est_maps[2])][:lmax+1])
     wGK_D = profile[:lmax+1]/(cltot_dict[(est_maps[3], est_maps[3])][:lmax+1])/2
@@ -718,9 +794,54 @@ def main():
     if args.do_auto:
         if rank==0:
             print("running auto")
-        cl_KK_raw, cl_KK_lh_raw, Ks_ab, Ks_ab_lh, Ks_cd, Ks_cd_lh = run_ClKK(comm=comm)
-        if rank==0:
-            outputs = {}
+            outputs={}
+            #We probably also want to run on the kSZ theory here as the exact
+            #filters may affect slightly what we get
+            if args.ksz_theory_alm_file is not None:
+                ksz_theory_alm = utils.change_alm_lmax(
+                    hp.read_alm(args.ksz_theory_alm_file), args.mlmax)
+                cl_ksz = savgol_filter(
+                    curvedsky.alm2cl(ksz_theory_alm), 301, 2)
+                ksz_theory_alms_f = [
+                    f(ksz_theory_alm) for f in [
+                        setup["filter_A"], setup["filter_B"], setup["filter_C"], setup["filter_D"]]
+                    ]
+                if args.do_qe:
+                    K_ksz_AB = setup["qfunc_K_AB"](ksz_theory_alms_f[0],
+                                                   ksz_theory_alms_f[1])
+                    K_ksz_CD = setup["qfunc_K_CD"](ksz_theory_alms_f[2],
+                                                   ksz_theory_alms_f[3])
+                    Cl_KK_ksz_raw = curvedsky.alm2cl(K_ksz_AB, K_ksz_CD)
+                    ksz_N0 = setup["get_fg_trispectrum_N0_ABCD"](cl_ksz, cl_ksz, cl_ksz, cl_ksz)
+                    outputs["Cl_KK_ksz_theory_raw"] = Cl_KK_ksz_raw
+                    outputs["N0_ksz_theory"] = ksz_N0
+                    outputs["Cl_KK_ksz_theory"] = Cl_KK_ksz_raw-ksz_N0
+
+                if args.do_lh:
+                    K_ksz_AB = setup["qfunc_K_AB_lh"](ksz_theory_alms_f[0],
+                                                   ksz_theory_alms_f[1])
+                    K_ksz_CD = setup["qfunc_K_CD_lh"](ksz_theory_alms_f[2],
+                                                   ksz_theory_alms_f[3])
+                    Cl_KK_ksz_raw = curvedsky.alm2cl(K_ksz_AB, K_ksz_CD)
+                    #ksz_N0 = setup["get_fg_trispectrum_N0_ABCD_lh"](cl_ksz, cl_ksz, cl_ksz, cl_ksz)
+                    outputs["Cl_KK_ksz_theory_raw_lh"] = Cl_KK_ksz_raw
+                    #outputs["N0_ksz_theory_lh"] = ksz_N0
+                    #outputs["Cl_KK_ksz_theory_lh"] = Cl_KK_ksz_raw-ksz_N0
+
+                if args.do_psh:
+                    K_ksz_AB = setup["qfunc_K_AB_psh"](ksz_theory_alms_f[0],
+                                                   ksz_theory_alms_f[1])
+                    K_ksz_CD = setup["qfunc_K_CD_psh"](ksz_theory_alms_f[2],
+                                                   ksz_theory_alms_f[3])
+                    Cl_KK_ksz_raw = curvedsky.alm2cl(K_ksz_AB, K_ksz_CD)
+                    #ksz_N0 = setup["get_fg_trispectrum_N0_ABCD_psh"](cl_ksz, cl_ksz, cl_ksz, cl_ksz)
+                    outputs["Cl_KK_ksz_theory_raw_psh"] = Cl_KK_ksz_raw
+                    #outputs["N0_ksz_theory_psh"] = ksz_N0
+                    #outputs["Cl_KK_ksz_theory_psh"] = Cl_KK_ksz_raw-ksz_N0
+
+
+            #Now run on data
+            cl_KK_raw, cl_KK_lh_raw, Ks_ab, Ks_ab_lh, Ks_cd, Ks_cd_lh = run_ClKK(comm=comm)
             outputs["cl_KK_raw"] = cl_KK_raw
             outputs["cl_KK_lh_raw"] = cl_KK_lh_raw
             outputs["N0"] = setup["N0_ABCD_K"]
@@ -730,14 +851,30 @@ def main():
             outputs["Ks_ab_lh"] = Ks_ab_lh
             outputs["Ks_cd"] = Ks_cd
             outputs["Ks_cd_lh"] = Ks_cd_lh
-            
+            outputs["cl_rksz"] = cl_rksz #save what we used for filters
+            outputs["cltot_A"] = cltot_A
+            outputs["cltot_B"] = cltot_B
+            outputs["cltot_C"] = cltot_C
+            outputs["cltot_D"] = cltot_D
+            outputs["cltot_AC"] = cltot_AC
+            outputs["cltot_BD"] = cltot_BD
+            outputs["cltot_AD"] = cltot_AD
+            outputs["cltot_BC"] = cltot_BC
+
+            for leg,cltot in zip(["A","B","C","D"], [cltot_A,cltot_B,cltot_C,cltot_D]):
+                outputs["total_filter_%s"%leg] = profile / cltot
+
+            outputs["lmin"] = lmin
+            outputs["lmax"] = lmax
+            outputs["profile"] = setup["profile"]
+
             #save pkl
             with open(opj(args.output_dir, "auto_outputs.pkl"), 'wb') as f:
                 pickle.dump(outputs, f)
 
     def run_meanfield(setup, nsim, use_mpi=False, est=None,
                       combine_with_auto=False,
-                      Ks_ab=None, Ks_cd=None, do_lh=False,
+                      Ks_ab=None, Ks_cd=None, 
                       Ks_ab_lh=None, Ks_cd_lh=None,
                       fg_power_data=None, meanfield_tag=None
                       ):
@@ -748,6 +885,13 @@ def main():
             mean_field_outdir = opj(args.output_dir, "mean_field_nsim%d_%s"%(nsim, meanfield_tag))
         else:
             mean_field_outdir = opj(args.output_dir, "mean_field_nsim%d"%nsim)
+
+        if est=="lh":
+            mean_field_outdir = mean_field_outdir + "_lh"
+        elif est=="psh":
+            mean_field_outdir = mean_field_outdir + "_psh"
+            
+            
         safe_mkdir(mean_field_outdir)
         
         if args.get_sims_from_data_cls:
@@ -814,6 +958,9 @@ def main():
         if est=="lh":
             qfunc_AB = setup["qfunc_K_AB_lh"]
             qfunc_CD = setup["qfunc_K_CD_lh"]
+        elif est=="psh":
+            qfunc_AB = setup["qfunc_K_AB_psh"]
+            qfunc_CD = setup["qfunc_K_CD_psh"]
         else:
             qfunc_AB = setup["qfunc_K_AB"]
             qfunc_CD = setup["qfunc_K_CD"]
@@ -978,14 +1125,40 @@ def main():
             print(est_maps)
         else:
             fg_power_data = None
-        
-        run_meanfield(setup, args.nsim_meanfield, use_mpi=False, 
-                      combine_with_auto=args.combine_with_auto,
-                      Ks_ab=None, Ks_cd=None, do_lh=args.do_lh,
-                      Ks_ab_lh=None, Ks_cd_lh=None,
-                      fg_power_data = fg_power_data,
-                      meanfield_tag = args.meanfield_tag
-                      )
+
+        if args.do_qe:
+            print("running mean-field for qe case")
+            run_meanfield(setup, args.nsim_meanfield,  
+                          combine_with_auto=args.combine_with_auto,
+                          Ks_ab=None, Ks_cd=None, est=None,
+                          Ks_ab_lh=None, Ks_cd_lh=None,
+                          fg_power_data = fg_power_data,
+                          meanfield_tag = args.meanfield_tag
+                          )
+
+        if args.do_lh:
+            print("running mean-field for lensing-hardening case")
+            run_meanfield(setup, args.nsim_meanfield,
+                          combine_with_auto=args.combine_with_auto,
+                          Ks_ab=None, Ks_cd=None,
+                          Ks_ab_lh=None, Ks_cd_lh=None,
+                          fg_power_data = fg_power_data,
+                          meanfield_tag = args.meanfield_tag,
+                          est="lh"
+                          )
+
+        if args.do_psh:
+            print("running mean-field for psh case")
+            run_meanfield(setup, args.nsim_meanfield,
+                          combine_with_auto=args.combine_with_auto,
+                          Ks_ab=None, Ks_cd=None,
+                          Ks_ab_lh=None, Ks_cd_lh=None,
+                          fg_power_data = fg_power_data,
+                          meanfield_tag = args.meanfield_tag,
+                          est="psh"
+                          )
+
+            
                   
     def run_rdn0(setup, nsim, use_mpi=False,
                  est=None):
@@ -1070,9 +1243,13 @@ def main():
         if est=="lh":
             qfunc_AB = setup["qfunc_K_AB_lh"]
             qfunc_CD = setup["qfunc_K_CD_lh"]
+        elif est=="psh":
+            qfunc_AB = setup["qfunc_K_AB_psh"]
+            qfunc_CD = setup["qfunc_K_CD_psh"]
         else:
             qfunc_AB = setup["qfunc_K_AB"]
             qfunc_CD = setup["qfunc_K_CD"]
+
         rdn0,mcn0 = mcrdn0_s4(nsim, split_phi_to_cl,
                               qfunc_AB,
                               four_split_K,
@@ -1088,35 +1265,75 @@ def main():
         return rdn0, mcn0
 
     if args.do_rdn0:
-        if rank==0:
-            print("running qe rdn0")
-        rdn0, mcn0 = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi)
-        outputs = {}
-        outputs["rdn0"] = rdn0
-        outputs["mcn0"] = mcn0
-        if rank==0:
-            print("done qe rdn0")
+        if args.do_qe:
+            if rank==0:
+                print("running qe rdn0")
+            rdn0, mcn0 = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi)
+            outputs = {}
+            outputs["rdn0"] = rdn0
+            outputs["mcn0"] = mcn0
+            outputs["theory_N0"] = setup["N0_ABCD_K"]
+            if rank==0:
+                print("done qe rdn0")
+                
+            rdn0_file = opj(args.output_dir, "rdn0_outputs_nsim%d.pkl"%args.nsim_rdn0)
+            print("saving rdn0 outputs to %s"%rdn0_file)
+            with open(rdn0_file, 'wb') as f:
+                pickle.dump(outputs, f)
 
         if args.do_lh:
             if rank==0:
                 print("running lh rdn0") 
             rdn0_lh, mcn0_lh = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi,
                                   est="lh")
-            outputs["rdn0_lh"] = rdn0_lh
-            outputs["mcn0_lh"] = mcn0_lh            
+            outputs = {}
+            outputs["rdn0"] = rdn0_lh
+            outputs["mcn0"] = mcn0_lh            
+            outputs["theory_N0"] = setup["N0_ABCD_K_lh"]
             if rank==0:
-                print("done lh rdn0") 
-        
+                print("done lh rdn0")
+                
+            rdn0_file = opj(args.output_dir, "rdn0_outputs_lh_nsim%d.pkl"%args.nsim_rdn0)
+            print("saving rdn0 outputs to %s"%rdn0_file)
+            with open(rdn0_file, 'wb') as f:
+                pickle.dump(outputs, f)
+            if rank==0:
+                print("done lh rdn0")
+
+        if args.do_psh:
+            if rank==0:
+                print("running psh rdn0") 
+            rdn0_psh, mcn0_psh = run_rdn0(setup, args.nsim_rdn0, use_mpi=args.use_mpi,
+                                  est="psh")
+            outputs = {}
+            outputs["rdn0"] = rdn0_psh
+            outputs["mcn0"] = mcn0_psh            
+            outputs["theory_N0"] = setup["N0_ABCD_K_psh"]
+            if rank==0:
+                print("done psh rdn0")
+                
+            rdn0_file = opj(args.output_dir, "rdn0_outputs_psh_nsim%d.pkl"%args.nsim_rdn0)
+            print("saving rdn0 outputs to %s"%rdn0_file)
+            with open(rdn0_file, 'wb') as f:
+                pickle.dump(outputs, f)
+            if rank==0:
+                print("done psh rdn0")
+
+
+            
+        """
         outputs["theory_N0"] = setup["N0_ABCD_K"]
         outputs["theory_N0_lh"] = setup["N0_ABCD_K_lh"]
         #save pkl
+
+        output_file = "rdn0_outputs_nsim%d.pkl"%args.nsim_rdn0
         rdn0_file = opj(args.output_dir, "rdn0_outputs.pkl")
         print("saving rdn0 outputs to %s"%rdn0_file)
         with open(rdn0_file, 'wb') as f:
             pickle.dump(outputs, f)
     
     #run rdn0
-    """
+
     rdn0, mcn0 = run_rdn0(setup, nsim_rdn0, use_mpi=use_mpi)
     outputs = {}
     outputs["rdn0"] = rdn0
