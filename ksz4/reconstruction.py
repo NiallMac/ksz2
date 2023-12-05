@@ -69,6 +69,30 @@ def norm_qtt_asym(est,lmax,glmin,glmax,llmin,llmax,
             est,lmax,glmin,glmax,llmin,llmax,
                    rlmax,TT,OCTG,OCTL,gtype=gtype)
     
+def noise_xtt_asym(est, mlmax, lmin, lmax, wLA, wGB, wLC, wGD,
+                   cltot_AC, cltot_BD, cltot_AD, cltot_BC, profile=None):
+    if ((est=="srclens")) and (profile is not None):
+        return noise_spec.xtt_asym("srclens", mlmax,lmin,lmax,
+            wLA, wGB, wLC, wGD,
+            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])/profile
+    elif ((est=="lenssrc")) and (profile is not None):
+        return noise_spec.xtt_asym("lenssrc", mlmax,lmin,lmax,
+            wLA, wGB, wLC, wGD,
+            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])/profile 
+    
+    elif est in ["Ksrc","srcK"]:
+        n = noise_spec.qtt_asym(
+            "src", mlmax,lmin,lmax,
+            wLA, wGB, wLC, wGD,
+            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])[0]/profile
+        assert len(n)==mlmax+1
+        return n
+    else:
+        return noise_spec.xtt_asym(est, mlmax,lmin,lmax,
+            wLA, wGB, wLC, wGD,
+            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])
+        
+    
 def norm_xtt_asym(est,lmax,glmin,glmax,llmin,llmax,rlmax,
                    TT,OCTG,OCTL,gtype='',profile=None):
 
@@ -86,20 +110,20 @@ def norm_xtt_asym(est,lmax,glmin,glmax,llmin,llmax,rlmax,
         print("!!!!!!!!!!!!!!")
         print("I'm not too sure about these src-K cross responses...")
         print("need to run numerical tests")
-        r = norm_general.qtt_asym(
+        inv_r = (norm_general.qtt_asym(
             "src",lmax,glmin,glmax,llmin,llmax,
             rlmax, TT, OCTG/(profile[:glmax+1]), 
-            OCTL/(profile[:llmax+1]),
-            gtype=gtype)[0]
-        return r*profile
+            OCTL/(profile[:glmax+1]),
+            gtype=gtype)[0]*profile)
+        return 1./inv_r
     
     elif est=="Ksrc":
-        r = norm_general.qtt_asym(
+        inv_r = (norm_general.qtt_asym(
             "src",lmax,glmin,glmax,llmin,llmax,
-            rlmax, TT, OCTG/(profile[:llmax+1]),
+            rlmax, TT, OCTG/(profile[:glmax+1]),
             OCTL/(profile[:glmax+1]),
-            gtype=gtype)[0]
-        return r*profile 
+            gtype=gtype)[0]*profile)
+        return 1./inv_r
 
     else:
         return norm_general.xtt_asym(est,lmax,glmin,glmax,llmin,llmax,rlmax,
@@ -211,13 +235,42 @@ def setup_asym_recon(px, lmin, lmax, mlmax,
     
     return outputs
 
+
+def get_N0_matrix_bh(
+        N0_K, N0_K_Y, 
+        N0_Y_K, N0_Y, 
+        R_AB_inv, R_CD_inv):
+    #these input N0s should be normalized!!!
+    #and N0_Y should be for grad or curl only
+    #i.e. not a tuple with both
+    mlmax=len(N0_K)-1
+    N0_matrix = np.zeros((len(N0_K), 2, 2))
+    for N0 in (N0_K, N0_K_Y, N0_Y_K, N0_Y):
+        assert N0.shape == N0_K.shape
+    N0_matrix[:,0,0] = N0_K.copy()
+    N0_matrix[:,0,1] = N0_K_Y.copy()
+    N0_matrix[:,1,0] = N0_Y_K.copy()
+    N0_matrix[:,1,1] = N0_Y.copy()
+
+    #now the bh version
+    N0_matrix_bh = np.zeros_like(N0_matrix)
+    for l in range(mlmax+1):
+        N0_matrix_bh[l] = np.dot(
+            np.dot(R_AB_inv[l], N0_matrix[l]), (R_CD_inv[l]).T)
+    #0,0 element is the Y_bh N0
+    return N0_matrix_bh
+
+
+
 def setup_ABCD_recon(px, lmin, lmax, mlmax,
                       cl_rksz, cltot_A, cltot_B,
                       cltot_C, cltot_D,
                       cltot_AC, cltot_BD,
                       cltot_AD, cltot_BC, do_lh=False,
                       do_psh=False):
-
+    print("############")
+    print("do_psh:",do_psh)
+    print("#############")
     outputs = {}
     #CMB theory for filters
     ucls,_ = futils.get_theory_dicts(grad=True,
@@ -405,29 +458,6 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
     
     if do_lh:
 
-        def get_N0_matrix_lh(
-                N0_K, N0_K_phi, 
-                N0_phi_K, N0_phi, 
-                R_AB_inv, R_CD_inv):
-            #these input N0s should be normalized!!!
-            #and N0_phi should be for grad or curl only
-            #i.e. not a tuple with both
-
-            N0_matrix = np.zeros((mlmax+1, 2, 2))
-            for N0 in (N0_K, N0_K_phi, N0_phi_K, N0_phi):
-                assert N0.shape == (mlmax+1,)
-            N0_matrix[:,0,0] = N0_K.copy()
-            N0_matrix[:,0,1] = N0_K_phi.copy()
-            N0_matrix[:,1,0] = N0_phi_K.copy()
-            N0_matrix[:,1,1] = N0_phi.copy()
-
-            #now the lh version
-            N0_matrix_lh = np.zeros_like(N0_matrix)
-            for l in range(mlmax+1):
-                N0_matrix_lh[l] = np.dot(
-                    np.dot(R_AB_inv[l], N0_matrix[l]), (R_CD_inv[l]).T)
-            #0,0 element is the phi_bh N0
-            return N0_matrix_lh
         
         def get_qfunc_K_XY_lh(qfunc_K_XY, norm_K_XY, norm_phi_XY,
                               R_matrix_XY_inv):
@@ -451,15 +481,15 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
 
             return qfunc_K_XY_lh
 
-        R_matrix_AB_inv = get_inverse_response_matrix(
+        R_matrix_AB_inv_phi = get_inverse_response_matrix(
                 norm_K_AB, norm_phi_AB[0], R_K_phi_AB, R_phi_K_AB)
-        R_matrix_CD_inv = get_inverse_response_matrix(
+        R_matrix_CD_inv_phi = get_inverse_response_matrix(
                 norm_K_CD, norm_phi_CD[0], R_K_phi_CD, R_phi_K_CD)       
         
         qfunc_K_AB_lh = get_qfunc_K_XY_lh(qfunc_K_AB, norm_K_AB, norm_phi_AB,
-                                          R_matrix_AB_inv)
+                                          R_matrix_AB_inv_phi)
         qfunc_K_CD_lh = get_qfunc_K_XY_lh(qfunc_K_CD, norm_K_CD, norm_phi_CD,
-                                          R_matrix_CD_inv)
+                                          R_matrix_CD_inv_phi)
         outputs["qfunc_K_AB_lh"] = qfunc_K_AB_lh
         outputs["qfunc_K_CD_lh"] = qfunc_K_CD_lh
         
@@ -479,9 +509,9 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
             N0_ABCD_phi_K_nonorm
             *norm_phi_AB[0]*norm_K_CD)
 
-        N0_ABCD_K_lh = get_N0_matrix_lh(
+        N0_ABCD_K_lh = get_N0_matrix_bh(
             N0_ABCD_K, N0_ABCD_K_phi, N0_ABCD_phi_K, N0_ABCD_phi[0],
-            R_matrix_AB_inv, R_matrix_CD_inv)[:,0,0]
+            R_matrix_AB_inv_phi, R_matrix_CD_inv_phi)[:,0,0]
         outputs["N0_ABCD_K_lh"] = N0_ABCD_K_lh
 
         def get_fg_trispectrum_N0_ABCD_lh(clfg_AC, clfg_BD, clfg_AD, clfg_BC):
@@ -495,6 +525,7 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
                 clfg_AD[:lmax+1], clfg_BC[:lmax+1])
             N0_tri_ABCD_phi = (N0_tri_ABCD_phi_nonorm[0] * norm_phi_AB[0] * norm_phi_CD[0],
                                N0_tri_ABCD_phi_nonorm[1] * norm_phi_AB[1] * norm_phi_CD[1])
+            
             N0_tri_ABCD_K_phi_nonorm = noise_spec.xtt_asym(
                 "srclens", mlmax,lmin,lmax,
                 wLK_A, wGK_B, wLphi_C, wGphi_D,
@@ -511,24 +542,24 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
                 *norm_phi_AB[0]*norm_K_CD)
 
 
-            N0_tri_ABCD_phi_nonorm = noise_spec.qtt_asym(
-                'lens', mlmax, lmin, lmax,
-                 wLphi_A, wGphi_B, wLphi_C, wGphi_D,
-                 clfg_AC[:lmax+1], clfg_BD[:lmax+1], clfg_AD[:lmax+1], clfg_BC[:lmax+1])
-            #Normalize the N0                                                                                                                                                                                                
-            N0_tri_ABCD_phi = (N0_tri_ABCD_phi_nonorm[0] * norm_phi_AB[0] * norm_phi_CD[0],
-                           N0_tri_ABCD_phi_nonorm[1] * norm_phi_AB[1] * norm_phi_CD[1])
-
-            N0_tri_ABCD_K_lh = get_N0_matrix_lh(
+            #N0_tri_ABCD_phi_nonorm = noise_spec.qtt_asym(
+            #    'lens', mlmax, lmin, lmax,
+            #     wLphi_A, wGphi_B, wLphi_C, wGphi_D,
+            #     clfg_AC[:lmax+1], clfg_BD[:lmax+1], clfg_AD[:lmax+1], clfg_BC[:lmax+1])
+            ##Normalize the N0                                                                                                                                                                                                
+            #N0_tri_ABCD_phi = (N0_tri_ABCD_phi_nonorm[0] * norm_phi_AB[0] * norm_phi_CD[0],
+            #               N0_tri_ABCD_phi_nonorm[1] * norm_phi_AB[1] * norm_phi_CD[1])
+            
+            N0_tri_ABCD_K_lh = get_N0_matrix_bh(
                 N0_tri_ABCD_K, N0_tri_ABCD_K_phi, N0_tri_ABCD_phi_K, N0_tri_ABCD_phi[0],
-                R_matrix_AB_inv, R_matrix_CD_inv)[:,0,0]
+                R_matrix_AB_inv_phi, R_matrix_CD_inv_phi)[:,0,0]
             return N0_tri_ABCD_K_lh
         
         outputs["get_fg_trispectrum_N0_ABCD_lh"] = get_fg_trispectrum_N0_ABCD_lh
         
-        
     if do_psh:
 
+        """
         def get_N0_matrix_psh(
                 N0_K, N0_K_src, 
                 N0_src_K, N0_src, 
@@ -552,6 +583,7 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
                     np.dot(R_AB_inv[l], N0_matrix[l]), (R_CD_inv[l]).T)
             #0,0 element is the phi_bh N0
             return N0_matrix_psh
+        """
         
         def get_qfunc_K_XY_psh(qfunc_K_XY, norm_K_XY, norm_src_XY,
                               R_matrix_XY_inv):
@@ -572,38 +604,75 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
 
             return qfunc_K_XY_psh
 
-        R_matrix_AB_inv = get_inverse_response_matrix(
-                norm_K_AB, norm_phi_AB[0], R_K_phi_AB, R_phi_K_AB)
-        R_matrix_CD_inv = get_inverse_response_matrix(
-                norm_K_CD, norm_phi_CD[0], R_K_phi_CD, R_phi_K_CD)       
+        R_matrix_AB_inv_src = get_inverse_response_matrix(
+                norm_K_AB, norm_src_AB, R_K_src_AB, R_src_K_AB)
+        R_matrix_CD_inv_src = get_inverse_response_matrix(
+                norm_K_CD, norm_src_CD, R_K_src_CD, R_src_K_CD)
+        print("R_matrix_AB_inv_src",R_matrix_AB_inv_src)
         
         qfunc_K_AB_psh = get_qfunc_K_XY_psh(qfunc_K_AB, norm_K_AB, norm_src_AB,
-                                          R_matrix_AB_inv)
+                                          R_matrix_AB_inv_src)
         qfunc_K_CD_psh = get_qfunc_K_XY_psh(qfunc_K_CD, norm_K_CD, norm_src_CD,
-                                          R_matrix_CD_inv)
+                                          R_matrix_CD_inv_src)
         outputs["qfunc_K_AB_psh"] = qfunc_K_AB_psh
         outputs["qfunc_K_CD_psh"] = qfunc_K_CD_psh
         
-        N0_ABCD_K_src_nonorm = noise_spec.xtt_asym(
+        N0_ABCD_K_src_nonorm = noise_spec.qtt_asym(
             "src", mlmax,lmin,lmax,
-            wLK_A, wGK_B, wLK_C, wGK_D,
-            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])/profile
+            wLK_A, wGK_B, wLs_C, wGs_D,
+            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])[0]/profile
         N0_ABCD_K_src = (
             N0_ABCD_K_src_nonorm
             *norm_K_AB*norm_src_CD)
         
-        N0_ABCD_src_K_nonorm = noise_spec.xtt_asym(
+        N0_ABCD_src_K_nonorm = noise_spec.qtt_asym(
             "src", mlmax,lmin,lmax,
-            wLK_A, wGK_B, wLK_C, wGK_D,
-            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])/profile
+            wLs_A, wGs_B, wLK_C, wGK_D,
+            cltot_AC[:lmax+1], cltot_BD[:lmax+1], cltot_AD[:lmax+1], cltot_BC[:lmax+1])[0]/profile
         N0_ABCD_src_K = (
             N0_ABCD_src_K_nonorm
             * norm_src_AB * norm_K_CD)
 
-        N0_ABCD_K_psh = get_N0_matrix_lh(
+        N0_ABCD_K_psh = get_N0_matrix_bh(
             N0_ABCD_K, N0_ABCD_K_src, N0_ABCD_src_K, N0_ABCD_src,
-            R_matrix_AB_inv, R_matrix_CD_inv)[:,0,0]
+            R_matrix_AB_inv_src, R_matrix_CD_inv_src)[:,0,0]
         outputs["N0_ABCD_K_psh"] = N0_ABCD_K_psh
+            
+        def get_fg_trispectrum_N0_ABCD_psh(clfg_AC, clfg_BD, clfg_AD, clfg_BC):
+
+            N0_tri_ABCD_K = get_fg_trispectrum_N0_ABCD(
+                clfg_AC, clfg_BD, clfg_AD, clfg_BC)
+            
+            N0_tri_ABCD_src_nonorm = noise_spec.qtt_asym(
+                'src', mlmax, lmin, lmax,
+                wLs_A, wGs_B, wLs_C, wGs_D,
+                clfg_AC[:lmax+1], clfg_BD[:lmax+1], clfg_AD[:lmax+1], clfg_BC[:lmax+1])[0]
+            N0_tri_ABCD_src = N0_tri_ABCD_src_nonorm * norm_src_AB * norm_src_CD
+            
+            N0_tri_ABCD_K_src_nonorm = noise_spec.qtt_asym(
+                "src", mlmax,lmin,lmax,
+                wLK_A, wGK_B, wLs_C, wGs_D,
+                clfg_AC[:lmax+1], clfg_BD[:lmax+1], clfg_AD[:lmax+1], clfg_BC[:lmax+1])[0]/profile
+            N0_tri_ABCD_K_src = (
+                N0_tri_ABCD_K_src_nonorm
+                *norm_K_AB*norm_src_CD)
+            
+            N0_tri_ABCD_src_K_nonorm = noise_spec.qtt_asym(
+                "src", mlmax,lmin,lmax,
+                wLs_A, wGs_B, wLK_C, wGK_D,
+                clfg_AC[:lmax+1], clfg_BD[:lmax+1], clfg_AD[:lmax+1], clfg_BC[:lmax+1])[0]/profile
+            N0_tri_ABCD_src_K = (
+                N0_ABCD_src_K_nonorm
+                * norm_src_AB * norm_K_CD)
+
+
+            N0_tri_ABCD_K_psh = get_N0_matrix_bh(
+                N0_tri_ABCD_K, N0_tri_ABCD_K_src, N0_tri_ABCD_src_K, N0_tri_ABCD_src,
+                R_matrix_AB_inv_src, R_matrix_CD_inv_src)[:,0,0]
+
+            return N0_tri_ABCD_K_psh
+        
+        outputs["get_fg_trispectrum_N0_ABCD_psh"] = get_fg_trispectrum_N0_ABCD_psh
             
     return outputs
     
