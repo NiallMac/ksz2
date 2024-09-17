@@ -22,6 +22,8 @@ try:
 except KeyError:
     SEHGAL_DIR="/global/project/projectdirs/act/data/maccrann/sehgal"
 
+#This can do strange things at low l
+"""
 def get_cl_fg_smooth(alms, alm2=None):
     cl = curvedsky.alm2cl(alms, alm2=alm2)
     l = np.arange(len(cl))
@@ -33,6 +35,16 @@ def get_cl_fg_smooth(alms, alm2=None):
     d_smooth[d_smooth<0.] = 0.
     return np.where(
         l>0,d_smooth/l/(l+1),0.)    
+"""
+
+def get_cl_smooth(alm1, alm2=None, n=5):
+    if alm2 is None:
+        alm2=alm1
+    cl = curvedsky.alm2cl(alm1, alm2)
+    window = np.ones(int(n))/float(n)
+    cl_out = np.convolve(cl, window, mode="same")
+    cl_out[-n:] = cl[-n:]
+    return cl_out
 
 def filter_T(T_alm, cltot, lmin, lmax):
     """                                                                                                                                                                                                    
@@ -40,9 +52,11 @@ def filter_T(T_alm, cltot, lmin, lmax):
     return zero otherwise                                                                                                                                                                                  
     """
     mlmax=qe.get_mlmax(T_alm)
+    """
     print("mlmax:",mlmax)
     print("lmin:", lmin)
     print("lmax:", lmax)
+    """
     filt = np.zeros_like(cltot)
     ls = np.arange(filt.size)
     assert lmax<=ls.max()
@@ -267,7 +281,7 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
                       cltot_C, cltot_D,
                       cltot_AC, cltot_BD,
                       cltot_AD, cltot_BC, do_lh=False,
-                      do_psh=False):
+                      do_psh=False, divide_by_2uL=False):
     print("############")
     print("do_psh:",do_psh)
     print("#############")
@@ -276,12 +290,27 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
     ucls,_ = futils.get_theory_dicts(grad=True,
                                     lmax=mlmax)
     outputs["ucls"] = ucls
+    outputs["cl_rksz"] = cl_rksz
     #Get qfunc and normalization
     #profile is Cl**0.5
     profile = cl_rksz**0.5
     profile[:lmin] = profile[lmin] #funny things can happen with noisy Cls at low l
     outputs["profile"] = profile
 
+    outputs["lmin"] = lmin
+    outputs["lmax"] = lmax
+    outputs["mlmax"] = mlmax
+    
+    #also save all the total cls
+    outputs["cltot_A"] = cltot_A
+    outputs["cltot_B"] = cltot_B
+    outputs["cltot_C"] = cltot_C
+    outputs["cltot_D"] = cltot_D
+    outputs["cltot_AC"] = cltot_AC
+    outputs["cltot_BD"] = cltot_BD
+    outputs["cltot_AD"] = cltot_AD
+    outputs["cltot_BC"] = cltot_BC
+    
     def filter_A(X):
         return filter_T(X, cltot_A, lmin, lmax)
     outputs["filter_A"] = filter_A
@@ -370,12 +399,15 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
         R_K_phi_AB = norm_xtt_asym(
             "srclens", *norm_args_AB, profile=profile)
         outputs["R_K_phi_AB"] = R_K_phi_AB
+        
         R_phi_K_AB = norm_xtt_asym(
             "lenssrc", *norm_args_AB, profile=profile)
         outputs["R_phi_K_AB"] = R_phi_K_AB
+        
         R_K_phi_CD = norm_xtt_asym(
             "srclens", *norm_args_CD, profile=profile)
-        outputs["R_K_phi_AB"] = R_K_phi_AB
+        outputs["R_K_phi_CD"] = R_K_phi_CD
+        
         R_phi_K_CD = norm_xtt_asym(
             "lenssrc", *norm_args_CD, profile=profile)
         outputs["R_phi_K_CD"] = R_phi_K_CD
@@ -399,9 +431,10 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
         R_src_K_AB = norm_xtt_asym(
             "srcK", *norm_args_AB, profile=profile)
         outputs["R_src_K_AB"] = R_src_K_AB
+        
         R_K_src_CD = norm_xtt_asym(
             "Ksrc", *norm_args_CD, profile=profile)
-        outputs["R_K_src_AB"] = R_K_src_AB
+        outputs["R_K_src_CD"] = R_K_src_CD
         R_src_K_CD = norm_xtt_asym(
             "srcK", *norm_args_CD, profile=profile)
         outputs["R_src_K_CD"] = R_src_K_CD
@@ -432,20 +465,29 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
         K_nonorm = qe.qe_source(
             px, mlmax, A_filtered,
             xfTalm=B_filtered, profile=profile)
-        #and normalize                                                                                                             
-        return curvedsky.almxfl(K_nonorm, norm_K_AB)
+        #and normalize
+        if divide_by_2uL:
+            raise ValueError("not yet implemeneted divide_by_2uL")
+            norm = norm_K_AB / 2 / profile
+        else:
+            norm = norm_K_AB
+        return curvedsky.almxfl(K_nonorm, norm)
 
     def qfunc_K_CD(C_filtered, D_filtered):
         K_nonorm = qe.qe_source(
             px, mlmax, C_filtered,
             xfTalm=D_filtered, profile=profile)
         #and normalize                                                                                                             
+        if divide_by_2uL:
+            norm = norm_K_CD / 2 / profile
+        else:
+            norm = norm_K_CD
         return curvedsky.almxfl(K_nonorm, norm_K_CD)
 
     outputs["qfunc_K_AB"] = qfunc_K_AB
-    outputs["qfunc_K_AB_incfilter"] = lambda X,Y: qfunc_K_XY(filter_A(X), filter_B(Y))
+    outputs["qfunc_K_AB_incfilter"] = lambda X,Y: qfunc_K_AB(filter_A(X), filter_B(Y))
     outputs["qfunc_K_CD"] = qfunc_K_CD
-    outputs["qfunc_K_AB_incfilter"] = lambda X,Y: qfunc_K_XY(filter_A(X), filter_B(Y))
+    outputs["qfunc_K_CD_incfilter"] = lambda X,Y: qfunc_K_CD(filter_C(X), filter_D(Y))
 
     def get_inverse_response_matrix(norm_K, norm_phi, R_K_phi, R_phi_K):
         R = np.ones((mlmax+1, 2, 2))
@@ -612,7 +654,7 @@ def setup_ABCD_recon(px, lmin, lmax, mlmax,
                 norm_K_AB, norm_src_AB, R_K_src_AB, R_src_K_AB)
         R_matrix_CD_inv_src = get_inverse_response_matrix(
                 norm_K_CD, norm_src_CD, R_K_src_CD, R_src_K_CD)
-        print("R_matrix_AB_inv_src",R_matrix_AB_inv_src)
+        #print("R_matrix_AB_inv_src",R_matrix_AB_inv_src)
         
         qfunc_K_AB_psh, qfunc_src_AB  = get_qfunc_K_XY_psh(qfunc_K_AB, norm_K_AB, norm_src_AB,
                                           R_matrix_AB_inv_src)
