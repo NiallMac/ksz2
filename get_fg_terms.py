@@ -9,7 +9,7 @@ import numpy as np
 from falafel import utils, qe
 import pytempura
 import solenspipe
-from pixell import lensing, curvedsky, enmap
+from pixell import lensing, curvedsky, enmap, reproject
 from pixell import utils as putils
 from os.path import join as opj
 import argparse
@@ -20,7 +20,7 @@ from orphics import maps
 from copy import deepcopy
 import sys
 from scipy.signal import savgol_filter
-from ksz4.reconstruction import setup_recon, setup_asym_recon, setup_ABCD_recon
+from ksz4.reconstruction import setup_recon, setup_asym_recon, setup_ABCD_recon, get_cl_smooth
 
 CB_color_cycle = ['#377eb8', '#ff7f00', '#4daf4a',
                   '#f781bf', '#a65628', '#984ea3',
@@ -33,17 +33,6 @@ disable_mpi = get_disable_mpi()
 if not disable_mpi:
     from mpi4py import MPI
 
-def get_cl_fg_smooth(alms, alm2=None):
-    cl = curvedsky.alm2cl(alms, alm2=alm2)
-    l = np.arange(len(cl))
-    d = l*(l+1)*cl
-    #smooth with savgol
-    d_smooth = savgol_filter(d, 301, 2)
-    #if there's still negative values, set them
-    #to zero
-    d_smooth[d_smooth<0.] = 0.
-    return np.where(
-        l>0,d_smooth/l/(l+1),0.)
     
 with open("fg_term_defaults.yaml",'rb') as f:
     DEFAULTS=yaml.load(f)
@@ -182,7 +171,16 @@ def trispectrum_N0_psh(cl_total, cl_fg, norm_s,
     N0_tri /= profile**2
     return N0_tri
     
-
+def read_alm(alm_file, extra_weight_map=None, lmax=None):
+    alm = hp.read_alm(alm_file)
+    lmax_orig = hp.Alm.getlmax(len(alm))
+    if extra_weight_map is not None:
+        nside=hp.npix2nside(len(extra_weight_map))
+        m = hp.alm2map(alm, nside=nside)*extra_weight_map
+        alm = hp.map2alm(m, lmax=lmax_orig)
+    if lmax is not None:
+        alm = utils.change_alm_lmax(alm, lmax)
+    return alm
     
 def main():
 
@@ -199,6 +197,48 @@ def main():
     #get config from prep map stage
     with open(opj(args.output_dir, 'prep_map', 'prepare_map_config.yml'),'r') as f:
         prep_map_config = yaml.load(f)
+
+    #check for a survey_mask_hpix
+    #we may also want to apply an extra weight here
+    #if not, the weight_map just becomes survey_mask_hpix
+    if prep_map_config["survey_mask_hpix"] is not None:
+        print("reading survey_mask_pix from %s"%prep_map_config["survey_mask_hpix"])
+        weight_map = hp.read_map(prep_map_config["survey_mask_hpix"])
+    else:
+        weight_map = None
+        
+    if args.apply_extra_weight is not None:
+        print("using weight map from %s"%args.apply_extra_weight)
+        if "," in args.apply_extra_weight:
+            extra_weight_filename, ext = (args.apply_extra_weight).split(",")
+            extra_weight = enmap.read_map(extra_weight_filename)[0]
+        else:
+            extra_weight = enmap.read_map(args.apply_extra_weight)
+
+        if args.extra_weight_power is not None:
+            extra_weight = extra_weight**args.extra_weight_power
+            
+        extra_weight_hpix = reproject.map2healpix(extra_weight, 
+                                                  nside=hp.npix2nside(len(weight_map)), 
+                                                  method="spline")
+
+        
+        if weight_map is None:
+            weight_map = extra_weight_hpix
+        else:
+            weight_map *= extra_weight_hpix
+    else:
+        extra_weight_hpix = None
+        
+    if weight_map is None:
+        w2=1.
+        w4=1.
+    else:
+        w2 = maps.wfactor(2, weight_map, equal_area=True)
+        w4 = maps.wfactor(4, weight_map, equal_area=True)
+        
+    print("w2:",w2)
+    print("w4:",w4)
 
     if recon_config['mlmax'] is None:
         recon_config['mlmax'] = prep_map_config["lmax_out"]
@@ -229,7 +269,7 @@ def main():
         recon_config['ksz_reion_alms'])
     rksz_alms = utils.change_alm_lmax(
             rksz_alms, recon_config["mlmax"])
-    cl_rksz = get_cl_fg_smooth(rksz_alms)
+    cl_rksz = get_cl_smooth(rksz_alms)
             
     #Get kappa alms
     print("reading kappa alms")
@@ -252,10 +292,11 @@ def main():
 
     nfreq = len(args.freqs)
     for ifreq,freq in enumerate(args.freqs):
-        if rank>=nfreq:
-            return
-        if ifreq%size != rank:
-            continue
+        if args.parallelise_freqs:
+            if rank>=nfreq:
+                return
+            if ifreq%size != rank:
+                continue
 
         print("rank %d doing freq: %s"%(rank,freq))
         #Read alms for reconstruction
@@ -269,6 +310,8 @@ def main():
         try:
             float(freq)
         except ValueError:
+            freq_is_number = False
+        if "_" in freq:
             freq_is_number = False
 
         is_freq_diff=False
@@ -287,6 +330,7 @@ def main():
                       'hilc-tszandcibd','freqcoadd'])
             or (("_" not in freq) and freq.startswith("deproj"))
             or is_freq_diff):
+            raise ValueError("not supporting this right now")
             fg_alm_file = opj(map_dir, cmb_name,
                               "fg_nonoise_alms_%s.fits"%freq)
             print(fg_alm_file)
@@ -299,6 +343,7 @@ def main():
         #may want to generalize that. Read in a tuple of foreground
         #alms 
         elif freq.startswith("XY_"):
+            raise ValueError("not supporting this right now")
             freqX = freq[3:].split("_")[0]
             freqY = freq[3:].split("_")[1]
             fg_alms_X = hp.fitsfunc.read_alm(
@@ -323,6 +368,22 @@ def main():
             #freqB = "hilc-tszd"
             #freqC = "hilc"
             #freqD = "hilc-cibd"
+
+            
+            fg_alms_A = read_alm(opj(map_dir, cmb_name, "fg_nonoise_alms_%s.fits"%freqA),
+                                 extra_weight_map=extra_weight_hpix,
+                                 lmax=recon_config["mlmax"])
+            fg_alms_B = read_alm(opj(map_dir, cmb_name, "fg_nonoise_alms_%s.fits"%freqB),
+                                 extra_weight_map=extra_weight_hpix,
+                                 lmax=recon_config["mlmax"])
+            fg_alms_C = read_alm(opj(map_dir, cmb_name, "fg_nonoise_alms_%s.fits"%freqC),
+                                 extra_weight_map=extra_weight_hpix,
+                                 lmax=recon_config["mlmax"])
+            fg_alms_D = read_alm(opj(map_dir, cmb_name, "fg_nonoise_alms_%s.fits"%freqD),
+                                 extra_weight_map=extra_weight_hpix,
+                                 lmax=recon_config["mlmax"])                        
+            
+            """
             fg_alms_A = utils.change_alm_lmax(
                 hp.fitsfunc.read_alm(
                 opj(map_dir, cmb_name, "fg_nonoise_alms_%s.fits"%freqA)
@@ -343,6 +404,7 @@ def main():
                 opj(map_dir, cmb_name, "fg_nonoise_alms_%s.fits"%freqD)
                 ), recon_config["mlmax"]
             )
+            """
             fg_alms = (fg_alms_A, fg_alms_B, fg_alms_C, fg_alms_D)
 
         else:
@@ -350,22 +412,22 @@ def main():
 
         if isinstance(fg_alms, tuple):
             if len(fg_alms)==2:
-                cl_fg_XX = get_cl_fg_smooth(fg_alms[0])
-                cl_fg_YY = get_cl_fg_smooth(fg_alms[1])
-                cl_fg_XY = get_cl_fg_smooth(fg_alms[0], fg_alms[1])
+                cl_fg_XX = get_cl_smooth(fg_alms[0])/w2
+                cl_fg_YY = get_cl_smooth(fg_alms[1])/w2
+                cl_fg_XY = get_cl_smooth(fg_alms[0], fg_alms[1])/w2
             elif len(fg_alms)==4:
-                cl_fg_AA = get_cl_fg_smooth(fg_alms[0])
-                cl_fg_BB = get_cl_fg_smooth(fg_alms[1])
-                cl_fg_CC = get_cl_fg_smooth(fg_alms[2])
-                cl_fg_DD = get_cl_fg_smooth(fg_alms[3])
-                cl_fg_AB = get_cl_fg_smooth(fg_alms[0], fg_alms[1])
-                cl_fg_AC = get_cl_fg_smooth(fg_alms[0], fg_alms[2])
-                cl_fg_AD = get_cl_fg_smooth(fg_alms[0], fg_alms[3])
-                cl_fg_BC = get_cl_fg_smooth(fg_alms[1], fg_alms[2])
-                cl_fg_BD = get_cl_fg_smooth(fg_alms[1], fg_alms[3])
-                cl_fg_CD = get_cl_fg_smooth(fg_alms[2], fg_alms[3])
+                cl_fg_AA = get_cl_smooth(fg_alms[0])/w2
+                cl_fg_BB = get_cl_smooth(fg_alms[1])/w2
+                cl_fg_CC = get_cl_smooth(fg_alms[2])/w2
+                cl_fg_DD = get_cl_smooth(fg_alms[3])/w2
+                cl_fg_AB = get_cl_smooth(fg_alms[0], fg_alms[1])/w2
+                cl_fg_AC = get_cl_smooth(fg_alms[0], fg_alms[2])/w2
+                cl_fg_AD = get_cl_smooth(fg_alms[0], fg_alms[3])/w2
+                cl_fg_BC = get_cl_smooth(fg_alms[1], fg_alms[2])/w2
+                cl_fg_BD = get_cl_smooth(fg_alms[1], fg_alms[3])/w2
+                cl_fg_CD = get_cl_smooth(fg_alms[2], fg_alms[3])/w2
         else:
-            cl_fg = get_cl_fg_smooth(fg_alms)
+            cl_fg = get_cl_smooth(fg_alms)/w2
 
         
         #Load total cl data
@@ -375,6 +437,7 @@ def main():
 
         print("doing setup")
         if freq.startswith("XY_"): # in ["tszd-sym", "cibd-sym", "tszandcibd-sym"]:
+            raise ValueError("not using this option now")
             assert isinstance(fg_alms, tuple)
             #The code for these asymmetric estimators is quite
             #different to what we had before. So for now just do
@@ -449,7 +512,7 @@ def main():
 
             cmb_name = recon_config['cmb_name']
             outputs = OrderedDict()
-            outputs["profile"] = profile
+            outputs["profile"] = profile.copy()
 
             fg_alms_filtered_X = recon_stuff["filter_X"](fg_alms[0])
             fg_alms_filtered_Y = recon_stuff["filter_Y"](fg_alms[1])
@@ -457,16 +520,19 @@ def main():
                                    recon_config['K_lmax'],
                                    recon_config['mlmax'])
             
-            outputs["N0_K"] = recon_stuff["N0_XYXY_K"]
+            outputs["N0_K"] = (recon_stuff["N0_XYXY_K"]).copy()
+            outputs["norm_K_AB"] = recon_stuff["norm_K_AB"]
+            outputs["norm_K_CD"] = recon_stuff["norm_K_CD"]
+            
             jobs = [("qe", recon_stuff["qfunc_K_XY"],
                      recon_stuff["get_fg_trispectrum_N0_XYXY"])]
             if args.do_lh:
-                outputs["N0_K_lh"] = recon_stuff["N0_XYXY_K_lh"]
+                outputs["N0_K_lh"] = (recon_stuff["N0_XYXY_K_lh"]).copy()
                 jobs += [("psh", recon_stuff["qfunc_K_XY_lh"],
                           recon_stuff["get_fg_trispectrum_N0_XYXY_lh"])
                          ]
             if args.do_psh:
-                outputs["N0_K_psh"] = recon_stuff["N0_XYXY_K_psh"]
+                outputs["N0_K_psh"] = (recon_stuff["N0_XYXY_K_psh"]).copy()
                 jobs += [("lh", recon_stuff["qfunc_K_XY_psh"],
                           recon_stuff["get_fg_trispectrum_N0_XYXY_psh"])
                          ]
@@ -481,17 +547,17 @@ def main():
                     fg_alms_filtered_X, fg_alms_filtered_Y)
 
                 #Do trispectrum
-                cl_tri_raw = curvedsky.alm2cl(K_fg_fg, K_fg_fg)
-                N0_tri = get_tri_N0(cl_fg_XX, cl_fg_YY, cl_fg_XY)
+                cl_tri_raw = curvedsky.alm2cl(K_fg_fg, K_fg_fg) / w4
+                N0_tri = get_tri_N0(cl_fg_XX, cl_fg_YY, cl_fg_XY) 
                 outputs['trispectrum_'+est_name] = cl_tri_raw - N0_tri
-                outputs['trispectrum_N0_'+est_name] = N0_tri
+                outputs['trispectrum_N0_'+est_name] = N0_tri.copy()
 
                 print("doing ksz only")
                 K_ksz = qfunc(Xf_ksz, Yf_ksz)
                 cl_K_ksz_raw = curvedsky.alm2cl(K_ksz)
                 ksz_N0 = get_tri_N0(cl_rksz, cl_rksz, cl_rksz)
                 cl_K_ksz = cl_K_ksz_raw - ksz_N0
-                outputs["cl_K_ksz"] = cl_K_ksz 
+                outputs["cl_K_ksz"] = cl_K_ksz.copy()
 
             output_data = np.zeros((recon_config["mlmax"]+1),
                                    dtype=[(k,float) for k in outputs.keys()])
@@ -510,6 +576,7 @@ def main():
             #this is the ABCD case
             assert isinstance(fg_alms, tuple)
             assert len(fg_alms)==4
+                             
             #The code for these asymmetric estimators is quite
             #different to what we had before. So for now just do
             #everything separately. But try and tidy things up
@@ -596,7 +663,7 @@ def main():
 
             cmb_name = recon_config['cmb_name']
             outputs = OrderedDict()
-            outputs["profile"] = profile
+            outputs["profile"] = profile.copy()
 
             fg_alms_filtered_A = recon_stuff["filter_A"](fg_alms[0])
             fg_alms_filtered_B = recon_stuff["filter_B"](fg_alms[1])
@@ -607,18 +674,18 @@ def main():
                                    recon_config['K_lmax'],
                                    recon_config['mlmax'])
             
-            outputs["N0_K"] = recon_stuff["N0_ABCD_K"]
+            outputs["N0_K"] = (recon_stuff["N0_ABCD_K"]).copy()
             jobs = [("qe", (recon_stuff["qfunc_K_AB"], recon_stuff["qfunc_K_CD"]),
                      recon_stuff["get_fg_trispectrum_N0_ABCD"])]
 
             
             if args.do_lh:
-                outputs["N0_K_lh"] = recon_stuff["N0_ABCD_K_lh"]
+                outputs["N0_K_lh"] = (recon_stuff["N0_ABCD_K_lh"]).copy()
                 jobs += [("lh", (recon_stuff["qfunc_K_AB_lh"], recon_stuff["qfunc_K_CD_lh"]),
                           recon_stuff["get_fg_trispectrum_N0_ABCD_lh"])
                          ]
             if args.do_psh:
-                outputs["N0_K_psh"] = recon_stuff["N0_ABCD_K_psh"]
+                outputs["N0_K_psh"] = (recon_stuff["N0_ABCD_K_psh"]).copy()
                 jobs += [("psh", (recon_stuff["qfunc_K_AB_psh"], recon_stuff["qfunc_K_CD_psh"]),
                           recon_stuff["get_fg_trispectrum_N0_ABCD_psh"])
                          ]
@@ -636,10 +703,11 @@ def main():
                     fg_alms_filtered_C, fg_alms_filtered_D)
 
                 #Do trispectrum
-                cl_tri_raw = curvedsky.alm2cl(KAB_fg_fg, KCD_fg_fg)
-                N0_tri = get_tri_N0(cl_fg_AC, cl_fg_BD, cl_fg_AD, cl_fg_BC)
+                cl_tri_raw = curvedsky.alm2cl(KAB_fg_fg, KCD_fg_fg) / w4
+                N0_tri = get_tri_N0(cl_fg_AC, cl_fg_BD, cl_fg_AD, cl_fg_BC) 
                 outputs['trispectrum_'+est_name] = cl_tri_raw - N0_tri
-                outputs['trispectrum_N0_'+est_name] = N0_tri
+                outputs['trispectrum_raw_'+est_name] = cl_tri_raw.copy()
+                outputs['trispectrum_N0_'+est_name] = N0_tri.copy()
 
                 print("doing ksz only")
                 KAB_ksz = qfuncs[0](Af_ksz, Bf_ksz)
@@ -648,49 +716,101 @@ def main():
                 cl_K_ksz_raw = curvedsky.alm2cl(KAB_ksz, KCD_ksz)
                 ksz_N0 = get_tri_N0(cl_rksz, cl_rksz, cl_rksz, cl_rksz)
                 cl_K_ksz = cl_K_ksz_raw - ksz_N0
-                outputs["cl_K_ksz"] = cl_K_ksz 
+                outputs["trispectrum_N0_ksz_"+est_name] = ksz_N0.copy()
+                outputs["cl_K_ksz_"+est_name] = cl_K_ksz.copy()
                 
                 
-            #mean-field?
-            """
-            if args.do_meanfield:
-                meanfield_data = []
-                cov_fg_power = np.zeros((4,4,mlmax+1))
-                cov_fg_power[0,0,:] = cltot_A
-                cov_fg_power[0,1,:] = cltot_AB
-                cov_fg_power[1,0,:] = cltot_AB
-                cov_fg_power[0,2,:] = cltot_AC
-                cov_fg_power[2,0,:] = cltot_AC
-                cov_fg_power[0,3,:] = cltot_AD
-                cov_fg_power[3,0,:] = cltot_AD
-                cov_fg_power[1,1,:] = cltot_B
-                cov_fg_power[1,2,:] = cltot_BC
-                cov_fg_power[2,1,:] = cltot_BC
-                cov_fg_power[2,2,:] = cltot_C
-                cov_fg_power[2,3,:] = cltot_CD
-                cov_fg_power[3,2,:] = cltot_CD
-                cov_fg_power[3,3,:] = cltot_D
-                for isim in range(args.nsim_meanfield):
-                    #generate cls
-                    fg_alms = curvedsky.rand_alm(cov_fg_power, seed=123+isim)
-                    fg_alms_filtered = []
-                    for iX,X in enumerate(["A","B","C","D"]):
-                        fg_alms_filtered.append(
-                        recon_config["filter_%s"%X](fg_alms[iX])
-                        )
-                KKi = curvedsky.alm2cl(
-                    recon_stuff["qfunc_K_AB"](fg_alms_filtered[0],fg_alms_filtered[1]),
-                    recon_stuff["qfunc_K_CD"](fg_alms_filtered[2],fg_alms_filtered[3]),
-                )
-                #mask
-                mask_hpix = 
-                
-                meanfield_data.append(KKi)
-            """
-            
+                #mean-field?
+                if args.do_meanfield:
+                    if weight_map is not None:
+                        nside = hp.get_nside(weight_map)
+                    cov_fg_power = np.zeros((4,4,mlmax+1))
+                    cov_fg_power[0,0,:] = cl_fg_AA 
+                    cov_fg_power[0,1,:] = cl_fg_AB 
+                    cov_fg_power[1,0,:] = cl_fg_AB 
+                    cov_fg_power[0,2,:] = cl_fg_AC 
+                    cov_fg_power[2,0,:] = cl_fg_AC 
+                    cov_fg_power[0,3,:] = cl_fg_AD 
+                    cov_fg_power[3,0,:] = cl_fg_AD 
+                    cov_fg_power[1,1,:] = cl_fg_BB 
+                    cov_fg_power[1,2,:] = cl_fg_BC 
+                    cov_fg_power[2,1,:] = cl_fg_BC
+                    cov_fg_power[1,3,:] = cl_fg_BD
+                    cov_fg_power[3,1,:] = cl_fg_BD
+                    cov_fg_power[2,2,:] = cl_fg_CC 
+                    cov_fg_power[2,3,:] = cl_fg_CD 
+                    cov_fg_power[3,2,:] = cl_fg_CD 
+                    cov_fg_power[3,3,:] = cl_fg_DD 
+                    K_ABs = []
+                    K_CDs = []
+                    CL_KK_SSs = []
+                    MCN0s = []
+                    for isim in range(args.nsim_meanfield):
+                        #generate alms
+                        fg_alms_g = curvedsky.rand_alm(cov_fg_power, seed=123+isim)
+                        #apply mask
+                        if weight_map is not None:
+                            print("weighting mean-field sims")
+                            print("[alm.shape for alm in fg_alms]", [alm.shape for alm in fg_alms_g] )
+                            print("survey_mask.shape", weight_map.shape)
+                            print("hp.get_nside(survey_mask)", hp.get_nside(weight_map))
+                            fg_alms_masked = []
+                            for alm in fg_alms_g:
+                                print("alm.shape:",alm.shape)
+                                m = hp.alm2map(alm, nside)*weight_map
+                                print("m.shape:",m.shape)
+                                fg_alms_masked.append( hp.map2alm(m, lmax=mlmax))
+                        else:
+                            fg_alms_masked = fg_alms_g
+                            #fg_alms = [ hp.map2alm(hp.alm2map(alm, nside)*survey_mask, lmax=len(cl_fg_AA)+1)
+                            #            for alm in fg_alms ]
+                        fg_alms_filtered = []
+                        for iX,X in enumerate(["A","B","C","D"]):
+                            fg_alms_filtered.append(
+                            recon_stuff["filter_%s"%X](fg_alms_masked[iX])
+                            )
+                        K_AB = qfuncs[0](fg_alms_filtered[0],fg_alms_filtered[1])
+                        K_CD = qfuncs[1](fg_alms_filtered[2],fg_alms_filtered[3])
+                        K_ABs.append(K_AB)
+                        K_CDs.append(K_CD)
+                        CL_KK_SSs.append(curvedsky.alm2cl(K_AB, K_CD))
 
-                
-                
+                        if isim > 0:
+                            K_AB_s_sp = qfuncs[0](fg_alms_filtered[0], fg_alms_filtered_prev[1])
+                            K_CD_s_sp = qfuncs[1](fg_alms_filtered[2], fg_alms_filtered_prev[3])
+                            K_CD_sp_s = qfuncs[1](fg_alms_filtered_prev[2], fg_alms_filtered[3])
+
+                            MCN0s.append(
+                                curvedsky.alm2cl(K_AB_s_sp, K_CD_s_sp)
+                                + curvedsky.alm2cl(K_AB_s_sp, K_CD_sp_s)
+                                )
+                            
+                        fg_alms_filtered_prev = list(fg_alms_filtered)
+
+                    #if rank==0:
+                    #    n_collected=1
+                    #    while n_collected<size:
+                    #        more_K_ABs, more_K_CDs, more_MCN0s = comm.recv(source=MPI.ANY_SOURCE)
+                    #        K_ABs += more_K_ABs
+                    #        K_CDs += more_K_CDs
+                    #        MCN0s += more_MCN0s
+                    #        n_collected+=1
+
+                    K_AB_mean = np.mean(np.array(K_ABs), axis=0)
+                    K_CD_mean = np.mean(np.array(K_CDs), axis=0)
+
+                    CL_KK_meanfield_auto = curvedsky.alm2cl(K_AB_mean, K_CD_mean)/w4
+                    CL_KK_meanfield_corrected = curvedsky.alm2cl(KAB_fg_fg-K_AB_mean,
+                                                                 KCD_fg_fg-K_CD_mean)/w4
+                    outputs["trispectrum_meanfield_auto_"+est_name] = CL_KK_meanfield_auto.copy()
+                    outputs["trispectrum_raw_meanfield_corrected_"+est_name] = CL_KK_meanfield_corrected.copy()
+                    
+
+                    MCN0 = np.mean(np.array(MCN0s), axis=0)
+                    outputs["trispectrum_MCN0_"+est_name] = (MCN0/w4).copy()
+                    outputs["trispectrum_MCN0_SS_"+est_name] = (np.mean(np.array(CL_KK_SSs), axis=0)/w4).copy()
+                        
+                    
             output_data = np.zeros((recon_config["mlmax"]+1),
                                    dtype=[(k,float) for k in outputs.keys()])
             for k,v in outputs.items():
@@ -705,6 +825,7 @@ def main():
             
         
         else:
+            raise ValueError("Not using this option right now")
             #Get noise for filters
             Nl_tt = cltot_data["Nltt_%s"%freq][:recon_config["mlmax"]+1]
             nells = {"TT":Nl_tt, "EE":2*Nl_tt, "BB":2*Nl_tt}
@@ -757,7 +878,7 @@ def main():
 
 
             fg_alms = utils.change_alm_lmax(fg_alms, recon_config['mlmax'])
-            cl_fg = get_cl_fg_smooth(fg_alms)
+            cl_fg = get_cl_smooth(fg_alms)
             fg_alms_filtered = filter_alms(fg_alms)
 
             K_lmin,K_lmax,mlmax = (recon_config['K_lmin'],
@@ -790,8 +911,8 @@ def main():
                     fg_alms_filtered, fg_alms_filtered)
 
                 #Do trispectrum
-                cl_tri_raw = curvedsky.alm2cl(K_fg_fg, K_fg_fg)
-                N0_tri = get_tri_N0(cl_fg)
+                cl_tri_raw = curvedsky.alm2cl(K_fg_fg, K_fg_fg) / w4
+                N0_tri = get_tri_N0(cl_fg) 
                 outputs['trispectrum_'+est_name] = cl_tri_raw - N0_tri
                 outputs['trispectrum_N0_'+est_name] = N0_tri
 
