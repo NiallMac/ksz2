@@ -83,7 +83,7 @@ def main():
         ivar_map *= args.scale_ivar
 
     #read in the mask
-    mask = enmap.read_map("/global/project/projectdirs/act/data/maccrann/dr6/dr6v2_default_union_mask.fits")
+    mask = enmap.read_map("/global/cfs/projectdirs/act/data/maccrann/dr6/dr6v2_default_union_mask.fits")
     print(ivar_map.shape, ivar_map.wcs)
     print(mask.shape, mask.wcs)
     

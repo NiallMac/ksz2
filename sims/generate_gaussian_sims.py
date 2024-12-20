@@ -34,11 +34,13 @@ def parse_args():
     parser.add_argument("--freqs", nargs="*", default=["90","150"])
     parser.add_argument("--sg_window", type=int, default=101)
     parser.add_argument("--sg_order", type=int, default=2)
-    #parser.add_argument("--apply_mask", action="store_true", default=False)
+    parser.add_argument("--apply_mask", action="store_true", default=False)
+    parser.add_argument("--save_masked_alms", action="store_true", default=False)
     parser.add_argument("--nsim_cal", type=int, default=10)
     parser.add_argument("--nsim", type=int, default=100)
     parser.add_argument("--mpi", action="store_true", default=False)
     parser.add_argument("--use_cmb_below_ell", type=int, default=1000)
+    parser.add_argument("--apply_beam_before_mask", type=float, default=None)
     return parser.parse_args()
 
 NSPLIT=4
@@ -60,30 +62,53 @@ def main():
         safe_mkdir(args.output_dir)
     
     data_template_path = Template(args.data_template_path)
+    print("args.data_template_path:", args.data_template_path)
 
     mask=enmap.read_map(args.mask_file)
+    print("reading mask from %s"%args.mask_file)
     w2 = maps.wfactor(2, mask)
     z = enmap.zeros(shape=mask.shape, wcs=mask.wcs)
 
     freqs=args.freqs
 
     Cl_dict = {}
+
+    def mask_alms(alms, mask):
+        lmax = hp.Alm.getlmax(len(alms[0]))
+        z = enmap.zeros(mask.shape, mask.wcs)
+        return [curvedsky.map2alm(curvedsky.alm2map(alm, z, tweak=True) * mask, tweak=True, lmax=lmax) for alm in alms]
     
     print("getting data Cls")
     for i in range(len(freqs)):
         freq_i = freqs[i]
         print("freq_i:",freq_i)
         print("reading alms from", data_template_path.substitute(freq=freq_i, split=0))
-        #alms_i = []
         alms_i = [hp.read_alm(data_template_path.substitute(freq=freq_i, split=split)) for split in range(NSPLIT)]
+        if args.apply_mask:
+            print("masking data alms")
+            alms_i = mask_alms(alms_i, mask)
+            if args.save_masked_alms:
+                if rank==0:
+                    for split in range(NSPLIT):
+                        hp.write_alm(opj(args.output_dir, "data_alm_%s_split%d.fits"%(freq_i,split)), alms_i[split], overwrite=True)
         alms_i = [futils.change_alm_lmax(alm, args.lmax) for alm in alms_i]
         print("read alms")
 
         for j in range(i,len(freqs)):
             freq_j = freqs[j]
             print("freq_j:",freq_j)
-            alms_j = [hp.read_alm(data_template_path.substitute(freq=freq_j, split=split)) for split in range(NSPLIT)]
-            alms_j = [futils.change_alm_lmax(alm, args.lmax) for alm in alms_j]
+            if i!=j:
+                alms_j = [hp.read_alm(data_template_path.substitute(freq=freq_j, split=split)) for split in range(NSPLIT)]
+                if args.apply_mask:
+                    print("masking data alms")
+                    alms_j = mask_alms(alms_j, mask)
+                if args.save_masked_alms:
+                    if rank==0:
+                        for split in range(NSPLIT):
+                            hp.write_alm(opj(args.output_dir, "data_alm_%s_split%d.fits"%(freq_j,split)), alms_j[split], overwrite=True)
+                alms_j = [futils.change_alm_lmax(alm, args.lmax) for alm in alms_j]
+            else:
+                alms_j=alms_i
 
             #we want to get just signal parts, 
             cl_splits = []
@@ -98,6 +123,7 @@ def main():
             cl_smooth = savgol_filter(np.mean(cl_splits, axis=0), args.sg_window, args.sg_order) / w2
             cl_smooth[cl_smooth<0.] = 0.
             Cl_dict[freq_i,freq_j] = cl_smooth
+            Cl_dict[freq_j,freq_i] = cl_smooth
 
     with open(opj(args.output_dir, "cl_orig.pkl"), "wb") as f:
         pickle.dump(Cl_dict, f)
@@ -118,6 +144,9 @@ def main():
             if isim%size != rank:
                 continue
         sim_alms = curvedsky.rand_alm(cov, seed=1234+isim)
+        if args.apply_beam_before_mask:
+            ells = np.arange(mlmax+1)
+            beam = maps.gauss_beam(ells, beam_fwhm)
         if len(freqs)==0:
             sim_alms = [sim_alms]
         #generate masked maps
@@ -188,8 +217,13 @@ def main():
     cmb_theory_cl = (futils.get_theory_dicts(grad=True, lmax=args.lmax+1)[1])["TT"]
     for i,freq_i in enumerate(freqs):
         for j,freq_j in enumerate(freqs):
-            cov_boosted[i,j,:args.use_cmb_below_ell] = cmb_theory_cl[:args.use_cmb_below_ell]
-            cov_boosted[i,j,args.use_cmb_below_ell:] = Cl_dict_boosted[(freq_i,freq_j)][args.use_cmb_below_ell:]
+            if args.use_cmb_below_ell > 0:
+                cov_boosted[i,j,:args.use_cmb_below_ell] = cmb_theory_cl[:args.use_cmb_below_ell]
+                cov_boosted[i,j,args.use_cmb_below_ell:] = Cl_dict_boosted[(freq_i,freq_j)][args.use_cmb_below_ell:]
+            else:
+                cl_use = Cl_dict_boosted[(freq_i,freq_j)]
+                cl_use[cl_use<0] = 0.
+                cov_boosted[i,j] = cl_use
             
     for isim in range(args.nsim):
         if size>1:

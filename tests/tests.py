@@ -6,7 +6,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import os
 import numpy as np
-from falafel import utils, qe
+from falafel import utils as futils, qe
 import pytempura
 import solenspipe
 from pixell import lensing, curvedsky, enmap
@@ -21,9 +21,20 @@ from websky_model import WebSky
 from copy import deepcopy
 import sys
 from scipy.signal import savgol_filter
-sys.path.append("../")
-from reconstruction import setup_recon
+from ksz4.reconstruction import setup_recon
+#sys.path.append("../")
+#from reconstruction import setup_recon
 
+
+disable_mpi = get_disable_mpi()
+if not disable_mpi:
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    rank,size = comm.rank, comm.size
+else:
+    comm = None
+    rank,size = 0,1
+    
 OUTDIR="test_output"
 safe_mkdir(OUTDIR)
 
@@ -33,7 +44,7 @@ def get_cl_fg_smooth(alms, alm2=None):
     l = np.arange(len(cl))
     d = l*(l+1)*cl
     #smooth with savgol
-    d_smooth = savgol_filter(d, 5, 2)
+    d_smooth = savgol_filter(d, 101, 2)
     #if there's still negative values, set them
     #to zero
     d_smooth[d_smooth<0.] = 0.
@@ -56,10 +67,10 @@ def test_rksz_only():
     Nl = (noise_sigma*np.pi/180./60.)**2./beam**2
     nells = {"TT":Nl, "EE":2*Nl, "BB":2*Nl}
 
-    ucls,tcls = utils.get_theory_dicts(grad=True, nells=nells, lmax=mlmax)
+    ucls,tcls = futils.get_theory_dicts(grad=True, nells=nells, lmax=mlmax)
 
     #Read in alms
-    ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("alms_4e3_2048_50_50_ksz.fits"),
+    ksz_alm = futils.change_alm_lmax(hp.fitsfunc.read_alm("alms_4e3_2048_50_50_ksz.fits"),
                                     mlmax)
     cl_rksz = get_cl_fg_smooth(ksz_alm)[:mlmax+1]
     tcls['TT'] += cl_rksz
@@ -71,6 +82,7 @@ def test_rksz_only():
                     do_psh=False)
 
     rksz_alm_filtered = recon_stuff["filter_alms_X"](ksz_alm)[0]
+    print("rksz_alm_filtered.shape", rksz_alm_filtered.shape)
     K_psh_recon_alms = recon_stuff["qfunc_K_psh"](rksz_alm_filtered, rksz_alm_filtered)
     K_recon_alms = recon_stuff["qfunc_K"](rksz_alm_filtered, rksz_alm_filtered)
     K_lh_recon_alms = recon_stuff["qfunc_K_lh"](rksz_alm_filtered, rksz_alm_filtered)
@@ -108,7 +120,7 @@ def test_rksz_only():
         outdata[c] = cl_dict[c]
     np.save(opj(OUTDIR, "test_rksz_only.npy"), outdata)
 
-def test_wcmb(nsim):
+def test_wcmb(nsim, from_pkl=False):
 
     #setup
     noise_sigma=10.
@@ -124,10 +136,10 @@ def test_wcmb(nsim):
     Nl = (noise_sigma*np.pi/180./60.)**2./beam**2
     nells = {"TT":Nl, "EE":2*Nl, "BB":2*Nl}
 
-    ucls,tcls = utils.get_theory_dicts(grad=True, nells=nells, lmax=mlmax)
+    _,tcls = futils.get_theory_dicts(grad=True, nells=nells, lmax=mlmax)
 
     #Read in ksz alms
-    ksz_alm = utils.change_alm_lmax(hp.fitsfunc.read_alm("alms_4e3_2048_50_50_ksz.fits"),
+    ksz_alm = futils.change_alm_lmax(hp.fitsfunc.read_alm("alms_4e3_2048_50_50_ksz.fits"),
                                     mlmax)
     cl_rksz = get_cl_fg_smooth(ksz_alm)[:mlmax+1]
     tcls['TT'] += cl_rksz
@@ -135,19 +147,19 @@ def test_wcmb(nsim):
     #setup reconstruction
     recon_stuff = setup_recon(px, lmin, lmax, mlmax,
                     cl_rksz, tcls, tcls_Y=None,
-                    do_lh=False,
-                    do_psh=False)
+                    do_lh=True,
+                    do_psh=True)
 
 
     pkl_filename = opj(OUTDIR, "test_data_wcmb.pkl")
-    from_pkl=False
+    #from_pkl=False
     if not from_pkl:
-        cl_dict = {"KK" : [],
-                   "KK_unlensed" : [],
+        cl_dict = {"KK_qe" : [],
+                   "KK_qe_unlensed" : [],
                    "KK_lh" : [],
-                   "KK_unlensed_lh" : [],
+                   "KK_lh_unlensed" : [],
                    "KK_psh" : [],
-                   "KK_unlensed_psh" : []
+                   "KK_psh_unlensed" : []
         }
 
         cl_dict["N0_K"] = recon_stuff["N0_K"]
@@ -166,8 +178,9 @@ def test_wcmb(nsim):
                 cmb_unlensed_alm, mlmax)
             ells = np.arange(mlmax+1)
             cl_dict["ells"] = ells
-            cl_kk_binned = binner(curvedsky.alm2cl(kappa_alm))
-            cl_dict['ii'].append(cl_kk_binned)
+        
+            #cl_kk_binned = binner(curvedsky.alm2cl(kappa_alm))
+            #cl_dict['ii'].append(cl_kk_binned)
 
             print("generating noise")
             noise_alm = curvedsky.rand_alm(Nl, seed=isim*(10*nsim))
@@ -177,8 +190,9 @@ def test_wcmb(nsim):
             sky_alm_wnoise = cmb_alm_wnoise+ksz_alm
             sky_unlensed_alm_wnoise = cmb_unlensed_alm_wnoise+ksz_alm
 
-            X = recon_stuff["filter_alms_X"](sky_alm_wnoise)[0]
-            X_unlensed = recon_stuff["filter_alms_X"](sky_unlensed_alm_wnoise)[0]
+            X = recon_stuff["filter_X"](sky_alm_wnoise)
+            X_unlensed = recon_stuff["filter_X"](sky_unlensed_alm_wnoise)
+            print("X.shape",X.shape)
             
             print("running K estimators")
             ests = ["qe", "lh", "psh"]
@@ -191,7 +205,7 @@ def test_wcmb(nsim):
                 cl_KK = curvedsky.alm2cl(K)
                 cl_KK_unlensed = curvedsky.alm2cl(K_unlensed)
                 cl_dict["KK_%s"%est].append(binner(cl_KK))
-                cl_dict["KK_unlensed_%s"%est].append(binner(cl_KK_unlensed))
+                cl_dict["KK_%s_unlensed"%est].append(binner(cl_KK_unlensed))
 
         if rank==0:
             #collect and plot
@@ -227,25 +241,25 @@ def test_wcmb(nsim):
         binner = ClBinner(lmin=cl_dict["lmin"], lmax=cl_dict["lmax"],
                           nbin=cl_dict["nbin"])
         ell_mids = binner.bin_mids
-        ax.plot(ell_mids, binner(cl_dict["KK_qe"].mean(axis=0)-cl_dict["N0"]),
+        ax.plot(ell_mids, cl_dict["KK_qe"].mean(axis=0)-binner(cl_dict["N0_K"]),
                  label="qe, lensed", color='C0')
-        ax.plot(ell_mids, binner(cl_dict["KK_unlensed_qe"].mean(axis=0)-cl_dict["N0"]),
+        ax.plot(ell_mids, cl_dict["KK_qe_unlensed"].mean(axis=0)-binner(cl_dict["N0_K"]),
                  label="qe, unlensed", color='C0', linestyle='--')
-        ax.plot(ell_mids, binner(cl_dict["KK_lh"].mean(axis=0)-cl_dict["N0_lh"]),
+        ax.plot(ell_mids, cl_dict["KK_lh"].mean(axis=0)-binner(cl_dict["N0_K_lh"]),
                  label="lh, lensed", color='C1')
-        ax.plot(ell_mids, binner(cl_dict["KK_unlensed_lh"].mean(axis=0)-cl_dict["N0_lh"]),
+        ax.plot(ell_mids, cl_dict["KK_lh_unlensed"].mean(axis=0)-binner(cl_dict["N0_K_lh"]),
                  label="lh, unlensed", color='C1', linestyle='--')
-        ax.plot(ell_mids, binner(cl_dict["KK_psh"].mean(axis=0)-cl_dict["N0_psh"]),
+        ax.plot(ell_mids, cl_dict["KK_psh"].mean(axis=0)-binner(cl_dict["N0_K_psh"]),
                  label="psh, lensed", color='C2')
-        ax.plot(ell_mids, binner(cl_dict["KK_unlensed_psh"].mean(axis=0)-cl_dict["N0_psh"]),
+        ax.plot(ell_mids, cl_dict["KK_psh_unlensed"].mean(axis=0)-binner(cl_dict["N0_K_psh"]),
                  label="psh, unlensed", color='C2', linestyle='--')
         ax.legend()
         fig.savefig(opj(OUTDIR, "test_wcmb1.png"))    
     
 
 def main():
-    test_rksz_only()
-    #test_wcmd(nsim=10)
+    #test_rksz_only()
+    test_wcmb(nsim=10, from_pkl=False)
 
 if __name__=="__main__":
     main()
