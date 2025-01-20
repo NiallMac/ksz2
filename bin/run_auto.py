@@ -449,36 +449,6 @@ def do_setup(args, verbose=False):
         print("reading data alms")
     #est_maps = (args.est_maps.strip()).split("_")
 
-    """
-    extra_mask = None
-    if args.apply_extra_mask is not None:
-        if verbose:
-            print("using extra weight map %s"%args.apply_extra_mask)
-        if "," in args.apply_extra_mask:
-            extra_mask_file, ind = args.apply_extra_mask.split(",")
-            extra_mask = enmap.read_map(extra_mask_file)[int(ind)]
-        else:
-            extra_mask = enmap.read_map(args.apply_extra_mask)
-
-        if args.smooth_extra_mask is not None:
-            if verbose:
-                print("smoothing weight map by Gaussian with sigma %.1f arcmin"%args.smooth_extra_mask)
-            extra_mask = enmap.smooth_gauss(extra_mask,
-                                            np.radians(args.smooth_extra_mask/60.)
-                                            )
-            
-        if args.extra_mask_power is not None:
-            if verbose:
-                print("raising by power %.1f"%args.extra_mask_power)
-            extra_mask = extra_mask ** args.extra_mask_power
-            
-        total_mask = mask*extra_mask
-        w1 = maps.wfactor(1, total_mask)
-        w2 = maps.wfactor(2, total_mask)
-        w4 = maps.wfactor(4, total_mask)
-    else:
-        total_mask = mask
-    """
     total_mask, extra_mask = get_weight_map(args, verbose=verbose)
     w1 = maps.wfactor(1, total_mask)
     w2 = maps.wfactor(2, total_mask)
