@@ -61,7 +61,7 @@ def save_alms():
         print(f_map)
         m = hp.read_map(f_map)
         alm = hp.map2alm(m, lmax=lmax_alm)
-        hp.write_alm(f_alm, alm)
+        hp.write_alm(f_alm, alm, overwrite=True)
 
 #Uncomment the below if this is the first time running!!!
 #save_alms()
@@ -76,7 +76,6 @@ def save_alms():
 
 ksz_alm=hp.read_alm("../tests/alms_4e3_2048_50_50_ksz.fits")
 cl_ksz = get_cl_smooth(ksz_alm)
-cl_ksz_raw=np.load("../tests/cl_4e3_2048_50_50_ksz.npy")
 #cl_ksz_raw = hp.alm2cl( hp.read_alm(sim_alm_files[0]) )
 #smooth this
 #cl_ksz = savgol_filter(cl_ksz_raw, 301, 2)
@@ -113,7 +112,7 @@ lmax = 5000
 mlmax = 6000
 px=qe.pixelization(nside=4096)
 
-
+tcmb = 2.725e6
 # - Get beam, noise and total Cl
 
 # In[8]:
@@ -127,10 +126,10 @@ _,tcls = utils.get_theory_dicts(grad=True, nells=nells, lmax=mlmax)
 Cl_tot_theory = tcls["TT"][:mlmax+1] + cl_ksz[:mlmax+1] #add kSZ to total Cl
 
 #Could also use total Cl from data...
-with open("/pscratch/sd/m/maccrann/ksz_outputs/output_hilc_hilc_hilc_hilc_dr6v4_v4_lmax5000_mask60sk_gausssims/auto_outputs.pkl","rb") as f:
-    auto_outputs = pickle.load(f)
-Cl_tot = auto_outputs["cltot_A"]
-#Cl_tot = Cl_tot_theory
+#with open("/pscratch/sd/m/maccrann/ksz_outputs/output_hilc_hilc_hilc_hilc_dr6v4_v4_lmax5000_mask60sk_gausssims/auto_outputs.pkl","rb") as f:
+#    auto_outputs = pickle.load(f)
+#Cl_tot = auto_outputs["cltot_A"]
+Cl_tot = Cl_tot_theory
 
 
 # In[ ]:
@@ -155,7 +154,8 @@ recon_setup = setup_ABCD_recon(px, lmin, lmax, mlmax,
 
 CL_KK_stuff = {}
 
-K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_22.02.24"
+#K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_22.02.24"
+K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_21.01.25"
 safe_mkdir(K_outdir)
 
 n_sim_to_run = len(sim_tags) #set to something else if e.g. we just wantt to run a couple
@@ -179,6 +179,8 @@ for i,(sim_tag, alm_file) in enumerate(zip(sim_tags[:n_sim_to_run], sim_alm_file
     CL_KK_stuff[sim_tag] = {}
     #read in map, convert to alms, and filter
     alm = hp.read_alm(alm_file)
+    #fix units 
+    alm *= tcmb
     cl_sim = get_cl_smooth(alm)
     alm_Af = recon_setup["filter_A"](alm) #note only need to use filter_A since all legs the same here
     
@@ -188,7 +190,7 @@ for i,(sim_tag, alm_file) in enumerate(zip(sim_tags[:n_sim_to_run], sim_alm_file
     trispectrum_N0 = recon_setup["get_fg_trispectrum_N0_ABCD"](cl_sim, cl_sim, cl_sim, cl_sim)
     CL_KK_stuff[sim_tag]["trispectrum_N0"] = trispectrum_N0
     CL_KK_stuff[sim_tag]['N0'] = recon_setup["N0_ABCD_K"]
-    CL_KK_stuff[sim_tag]["CL_KK"] = CL_KK_stuff[sim_tag]["CL_KK_raw"] - CL_KK_stuff[sim_tag]["trispectrum_N0"]
+    CL_KK_stuff[sim_tag]["CL_KK"] = (CL_KK_stuff[sim_tag]["CL_KK_raw"] - CL_KK_stuff[sim_tag]["trispectrum_N0"])/recon_setup["profile"]**2
     CL_KK_stuff[sim_tag]["profile"] = recon_setup["profile"]
     CL_KK_stuff[sim_tag]["Cl_ksz"] = cl_sim
     
@@ -238,7 +240,7 @@ if rank==0:
     ax.set_ylabel(r"$C_L^{KK}$")
     ax.legend()
     fig.tight_layout()
-    fig.savefig("amber_plots/CLKK_amber.png", dpi=200)
+    fig.savefig(K_outdir+"/"+"CLKK_amber.png", dpi=200)
 
 else:
     comm.send(CL_KK_stuff, dest=0)
