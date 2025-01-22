@@ -54,12 +54,14 @@ print(sim_alm_files[0])
 
 # In[4]:
 
-
+tcmb = 2.725e6
 def save_alms():
     safe_mkdir(output_alm_dir)
     for f_map,f_alm in zip(sim_map_files, sim_alm_files):
         print(f_map)
         m = hp.read_map(f_map)
+        #convert to T_cmb (muK)
+        m *= tcmb
         alm = hp.map2alm(m, lmax=lmax_alm)
         hp.write_alm(f_alm, alm, overwrite=True)
 
@@ -165,7 +167,7 @@ if rank==0:
     #Also run Alvarez
     ksz_alm_f = recon_setup["filter_A"](ksz_alm)
     K_alvarez = recon_setup["qfunc_K_AB"](ksz_alm_f, ksz_alm_f)
-    CL_KK_alvarez = curvedsky.alm2cl(K_alvarez, K_alvarez) - recon_setup["get_fg_trispectrum_N0_ABCD"](cl_ksz,cl_ksz,cl_ksz,cl_ksz)
+    CL_KK_alvarez = (curvedsky.alm2cl(K_alvarez, K_alvarez) - recon_setup["get_fg_trispectrum_N0_ABCD"](cl_ksz,cl_ksz,cl_ksz,cl_ksz))/recon_setup["profile"]**2
     CL_KK_stuff["CL_KK_alvarez"] = CL_KK_alvarez
     CL_KK_stuff["Cl_ksz_alvarez"] = cl_ksz
 
@@ -179,8 +181,6 @@ for i,(sim_tag, alm_file) in enumerate(zip(sim_tags[:n_sim_to_run], sim_alm_file
     CL_KK_stuff[sim_tag] = {}
     #read in map, convert to alms, and filter
     alm = hp.read_alm(alm_file)
-    #fix units 
-    alm *= tcmb
     cl_sim = get_cl_smooth(alm)
     alm_Af = recon_setup["filter_A"](alm) #note only need to use filter_A since all legs the same here
     
@@ -237,7 +237,7 @@ if rank==0:
     ax.set_yscale('log')
     ax.set_xscale('log')
     ax.set_xlabel(r"$L$")
-    ax.set_ylabel(r"$C_L^{KK}$")
+    ax.set_ylabel(r"$L^2 C_L^{KK}$")
     ax.legend()
     fig.tight_layout()
     fig.savefig(K_outdir+"/"+"CLKK_amber.png", dpi=200)
