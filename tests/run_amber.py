@@ -141,6 +141,10 @@ Cl_tot = Cl_tot_theory
 #I'm using the most general setup here (which allows for 4 different maps).
 #But here we're just using the same map in each leg hence all those Cl_tot
 #arguments are the same. 
+profile_hack=True
+if profile_hack:
+    cl_ksz[:lmin] = cl_ksz[lmin]
+    
 recon_setup = setup_ABCD_recon(px, lmin, lmax, mlmax,
                       cl_ksz[:mlmax+1], Cl_tot, Cl_tot,
                       Cl_tot, Cl_tot,
@@ -157,7 +161,11 @@ recon_setup = setup_ABCD_recon(px, lmin, lmax, mlmax,
 CL_KK_stuff = {}
 
 #K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_22.02.24"
-K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_21.01.25"
+if profile_hack:
+    K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_21.01.25_profile-hack"
+else:
+    K_outdir="/global/cfs/projectdirs/act/data/maccrann/amber_Ks/amber_Ks_21.01.25"
+
 safe_mkdir(K_outdir)
 
 n_sim_to_run = len(sim_tags) #set to something else if e.g. we just wantt to run a couple
