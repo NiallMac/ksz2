@@ -49,7 +49,7 @@ def get_fg_trispectrum(tag, fg_tag, freq, est, divide_by_uL=False, lpower=0, pre
     fg_data = np.load(opj("/pscratch/sd/m/maccrann/cmb/fg_outputs/", tag, "ksz2_fg_terms_%s"%fg_tag, "fg_terms_%s.npy"%freq))
     fg_bias = (fg_data["trispectrum_raw_meanfield_corrected_%s"%est]-fg_data["trispectrum_MCN0_%s"%est])
     if divide_by_uL:
-        fg_bias /= fg_data["profile"]
+        fg_bias /= fg_data["profile"]**2
         assert prefactor is None
     elif prefactor is not None:
         print("len(prefactor)", len(prefactor))
@@ -128,7 +128,7 @@ def get_CLKK_stuff(data_dir, rdn0_file, binner, w1=None, w4=None, nsim_meanfield
     
     prefactor=1.
     if divide_by_uL:
-        prefactor = 1./u_L
+        prefactor = (1./u_L)**2
     elif use_alt_norm:
         assert (divide_by_uL is False)
         print("only use altnorm when divide_by_uL is False")
