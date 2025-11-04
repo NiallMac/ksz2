@@ -1,6 +1,7 @@
 #!/bin/bash
 
-source  /global/cfs/projectdirs/act/data/maccrann/lenspipe_new/bin/activate
+#source  /global/cfs/projectdirs/act/data/maccrann/lenspipe_new/bin/activate
+source /global/cfs/projectdirs/act/data/maccrann/lenspipe_py3.13/bin/activate
 export DISABLE_MPI=false
 export MPI4PY_RC_RECV_MPROBE=0
 

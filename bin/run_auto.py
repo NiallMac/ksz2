@@ -7,7 +7,8 @@ import os
 #import sys
 #sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from ksz4.cross import four_split_K, split_phi_to_cl, mcrdn0_s4, mcn1_ABCD, mcrdn0
-from ksz4.reconstruction import setup_recon, setup_ABCD_recon, get_cl_smooth
+from ksz4.reconstruction import setup_ABCD_recon
+from ksz4.utils import get_cl_smooth
 from pixell import curvedsky, enmap, utils as putils
 from scipy.signal import savgol_filter
 from cmbsky import safe_mkdir, get_disable_mpi
@@ -88,7 +89,7 @@ def get_config(defaults=DEFAULTS,
         config_from_file = {}
     else:
         with open(config_file,"rb") as f:
-            config_from_file = yaml.load(f)
+            config_from_file = yaml.safe_load(f)
         config.update(config_from_file)
         
     config['output_dir'] = output_dir
@@ -333,8 +334,36 @@ def get_alms_dr6_hilc(data_dir="/global/cscratch1/sd/maccrann/cmb/act_dr6/ilc_cl
     return alms
 
 
+def get_sim_alm_dr6_nilc(map_name, sim_seed, sim_template_path, mlmax=None,
+                         apply_extra_mask=None, no_cross=True):
+    if no_cross:
+        alm_filenames = [Template(sim_template_path).substitute(
+            actseed="%04d"%sim_seed,
+            freq=map_name)]
+    alms=[]
+    for f in alm_filenames:
+        alm=hp.read_alm(f)
+        if mlmax is not None:
+            print("apply mlmax cut *before* masking - this is probably the wrong thing to do, but avoids memory issues")
+            alm = utils.change_alm_lmax(alm, mlmax)
+        lmax = hp.Alm.getlmax(len(alm))
+        if apply_extra_mask is not None:
+            print("applying extra mask")
+            z = enmap.zeros(shape=apply_extra_mask.shape,
+                            wcs=apply_extra_mask.wcs)
+            m = curvedsky.alm2map(alm, z, tweak=True)
+            m *= apply_extra_mask
+            alm = curvedsky.map2alm(m, lmax=lmax, tweak=True)
+
+        
+        if mlmax is not None:
+            alm = utils.change_alm_lmax(alm, mlmax)
+        alms.append(alm)
+    return np.array(alms)
+
 def get_sim_alm_dr6_hilc(map_name, sim_seed, sim_template_path, mlmax=None,
-                         apply_extra_mask=None):
+                         apply_extra_mask=None, no_cross=False):
+    sim_seed = (200+sim_seed, 0, sim_seed+1)
     alm_filenames = [Template(sim_template_path).substitute(
         planckseed=sim_seed[0], actset="%02d"%sim_seed[1], actseed="%05d"%sim_seed[2],
         freq=map_name, split=split) for split in range(NSPLIT)]
@@ -405,8 +434,14 @@ def get_weight_map(args, verbose=False):
             if verbose:
                 print("raising by power %.1f"%args.extra_mask_power)
             extra_mask = extra_mask ** args.extra_mask_power
-            
+
+
         total_mask = mask*extra_mask
+
+        #I think it's going to be convenient here to normalise the mask
+        #such that it has maximum value = 1
+        total_mask /= total_mask.max()
+            
         w1 = maps.wfactor(1, total_mask)
         w2 = maps.wfactor(2, total_mask)
         w4 = maps.wfactor(4, total_mask)
@@ -552,7 +587,6 @@ def do_setup(args, verbose=False):
         cltot_AC, cltot_BD, cltot_AD, cltot_BC,
         do_lh=True, do_psh=True)
 
-
     setup["cltot_A"] = cltot_A
     setup["cltot_B"] = cltot_B
     setup["cltot_C"] = cltot_C
@@ -597,8 +631,7 @@ def do_setup(args, verbose=False):
     N0_K_nonoise = N0_K_nonoise_nonorm * setup["norm_K_CD"] * setup["norm_K_AB"]
     setup["N0_K_nonoise"] = N0_K_nonoise
 
-    #run some measurements
-    #filter
+    #filter alms
     if verbose:
         print("filtering data alms")
     data_alms_Af = [setup["filter_A"](
@@ -852,392 +885,10 @@ def main():
                            verbose=(rank==0)
                           )
     data_alms_Af, data_alms_Bf, data_alms_Cf, data_alms_Df = data_alms_f
-    
-    """
-    #recon_config = vars(args)
-    safe_mkdir(args.output_dir)
-
-    #signal filter
-    if args.rksz_cl is None:
-        cl_rksz = DEFAULT_CL_RKSZ
-    else:
-        cl_rksz = np.load(args.rksz_cl)
-    
-    #get w2 and w4
-    mask = enmap.read_map(args.mask)
-    w1 = maps.wfactor(1, mask)
-    w2 = maps.wfactor(2, mask)
-    w4 = maps.wfactor(4, mask)
-    #w2 = 0.2758258447605825
-    #w4 = 0.2708454607428685
-    if rank==0:
-        print("w1:",w1)
-        print("w2:",w2)
-        print("w4:",w4)
-
-    
-    #read in alms for data
-    if rank==0:
-        print("reading data alms")
-    #est_maps = (args.est_maps.strip()).split("_")
-
-
-    extra_mask = None
-    if args.apply_extra_mask is not None:
-        if "," in args.apply_extra_mask:
-            extra_mask_file, ind = args.apply_extra_mask.split(",")
-            extra_mask = enmap.read_map(extra_mask_file)[int(ind)]
-        else:
-            extra_mask = enmap.read_map(args.apply_extra_mask)
-
-        if args.extra_mask_power is not None:
-            extra_mask = extra_mask ** args.extra_mask_power
-            
-        total_mask = mask*extra_mask
-        w1 = maps.wfactor(1, total_mask)
-        w2 = maps.wfactor(2, total_mask)
-        w4 = maps.wfactor(4, total_mask)
-    else:
-        total_mask = mask
-
-    data_alms = get_alms_dr6(args.data_template_path,
-                             freqs=list(set(args.est_maps)), mlmax=args.mlmax,
-                             apply_extra_mask=extra_mask,
-                             verbose=(rank==0))
-    if rank==0:
-        print("data_alms.keys():")
-        print(data_alms.keys())
-    #data_alms = get_alms_dr6_hilc(mlmax=args.mlmax,
-    #                              map_names=list(set(est_maps)))
-
-    #get total Cls...hmm - maybe easiest to
-    #estimate these from input maps to start with,
-    #but also add an estimate from sims option
-    if args.use_Cltot_dict_from_file is not None:
-        print("using total Cl from file:",args.use_Cltot_dict_from_file)
-        with open(args.use_Cltot_dict_from_file, "rb") as f:
-            cltot_dict = pickle.load(f)
-    else:
-        if rank==0:
-            print("getting data Cls")
-        #get from data
-        cltot_dict = get_data_Cltot_dict(data_alms,
-                   sg_window=301, sg_order=2,
-                w2=w2)
-        #save total Cls
-        with open(opj(args.output_dir,
-                      "total_Cl_from_data.pkl"), "wb") as f:
-            pickle.dump(cltot_dict, f)
-
-    #do setup
-    #decide on lmin, lmax etc.
-    #and what combination of maps to use
-    #est_maps = recon_config["est_maps"]
-    lmin, lmax = args.K_lmin, args.K_lmax
-
-    n_alm = len( data_alms[ list(data_alms.keys())[0] ][0] )
-    if args.mlmax is None:
-        mlmax = hp.Alm.getlmax(n_alm)
-        args.mlmax = mlmax
-    else:
-        mlmax = args.mlmax
-
-    if rank==0:
-        print("getting data C_ls for sims")
-        print("mlmax = %d"%args.mlmax)
-    if args.mask_sim_lmax is None:
-        args.mask_sim_lmax=mlmax
-
-    if rank==0:
-        print("mask_sim_lmax = %d"%args.mask_sim_lmax)
-
-    data_cl_signal_dict, data_cl_noise_dict, cl_split_auto_dict, cl_split_cross_dict = get_sim_model_from_data(
-        args.data_template_path, freqs=list(set(args.est_maps)),
-        mlmax=args.mask_sim_lmax, nsplit=NSPLIT, sg_window=args.sg_window, sg_order=args.sg_order,
-        w2=w2)
-    if rank==0:
-        print("data_cl_signal_dict.keys()")
-        print(data_cl_signal_dict.keys())
-    #save these dictionaries for debugging
-    if rank==0:
-        with open(opj(args.output_dir, "data_cl_signal_dict.pkl"), "wb") as f:
-            pickle.dump(data_cl_signal_dict, f)
-        with open(opj(args.output_dir, "data_cl_noise_dict.pkl"), "wb") as f:
-            pickle.dump(data_cl_noise_dict, f)
-    
-    if rank==0:
-        print("lmin,lmax:", lmin,lmax)
-        print("mlmax:",mlmax)
-
-    if rank==0:
-        print("Setting up estimator")
-
-    if args.px_fullsky_0p5:
-        shape,wcs = enmap.fullsky_geometry(res=0.5*putils.arcmin)
-        px=qe.pixelization(shape=shape, wcs=wcs)
-    else:
-        px = qe.pixelization(shape=mask.shape,wcs=mask.wcs)
-    
-    cltot_A = cltot_dict[(args.est_maps[0], args.est_maps[0])][:mlmax+1]
-    cltot_B = cltot_dict[(args.est_maps[1], args.est_maps[1])][:mlmax+1]
-    cltot_C = cltot_dict[(args.est_maps[2], args.est_maps[2])][:mlmax+1]
-    cltot_D = cltot_dict[(args.est_maps[3], args.est_maps[3])][:mlmax+1]
-    cltot_AC = cltot_dict[(args.est_maps[0], args.est_maps[2])][:mlmax+1]
-    cltot_BD = cltot_dict[(args.est_maps[1], args.est_maps[3])][:mlmax+1]
-    cltot_AD = cltot_dict[(args.est_maps[0], args.est_maps[3])][:mlmax+1]
-    cltot_BC = cltot_dict[(args.est_maps[1], args.est_maps[2])][:mlmax+1]
-    
-    setup = setup_ABCD_recon(
-        px, lmin, lmax, mlmax,
-        cl_rksz[:mlmax+1], 
-        cltot_A, cltot_B, cltot_C, cltot_D,
-        cltot_AC, cltot_BD, cltot_AD, cltot_BC,
-        do_lh=True, do_psh=True)
-    profile = setup["profile"]
-
-    #add wfactors to setup
-    setup["w2"] = w2
-    setup["w4"] = w4
-    
-    if rank==0:
-        print("filter_A:",profile/cltot_A)
-        print("N0_ABCD_K[:300]:", setup["N0_ABCD_K"][:300])
-        print("N0_ABCD_K_lh[:300]:", setup["N0_ABCD_K_lh"][:300])
-        print("N0_ABCD_K_psh[:300]:", setup["N0_ABCD_K_psh"][:300])
-
-    #also get noiseless N0 - for split estimator, true N0 should
-    #be somewhere in between? Use signal only Cl (and here we
-    #should divide by w4 - didn't need to before to just generate
-    #gaussian alms)
-    wLK_A = profile[:lmax+1]/(cltot_dict[(args.est_maps[0], args.est_maps[0])][:lmax+1])
-    wLK_C = profile[:lmax+1]/(cltot_dict[(args.est_maps[2], args.est_maps[2])][:lmax+1])
-    wGK_D = profile[:lmax+1]/(cltot_dict[(args.est_maps[3], args.est_maps[3])][:lmax+1])/2
-    wGK_B = profile[:lmax+1]/(cltot_dict[(args.est_maps[1], args.est_maps[1])][:lmax+1])/2
-
-    N0_K_nonoise_nonorm = noise_spec.qtt_asym(
-        'src', mlmax, lmin, lmax,
-        wLK_A, wGK_B, wLK_C, wGK_D,
-        data_cl_signal_dict[(args.est_maps[0], args.est_maps[2])][:lmax+1],
-        data_cl_signal_dict[(args.est_maps[1], args.est_maps[3])][:lmax+1],
-        data_cl_signal_dict[(args.est_maps[0], args.est_maps[3])][:lmax+1],
-        data_cl_signal_dict[(args.est_maps[1], args.est_maps[2])][:lmax+1])[0]/profile[:mlmax+1]**2
-    N0_K_nonoise = N0_K_nonoise_nonorm * setup["norm_K_CD"] * setup["norm_K_AB"]
-    setup["N0_K_nonoise"] = N0_K_nonoise
-    
-    #run some measurements
-    #filter
-    if rank==0:
-        print("filtering data alms")
-    data_alms_Af = [setup["filter_A"](
-        data_alms[args.est_maps[0]][split])
-                    for split in range(NSPLIT)]
-    data_alms_Bf = [setup["filter_B"](
-        data_alms[args.est_maps[1]][split])
-                    for split in range(NSPLIT)]
-
-    if args.est_maps[2]!=args.est_maps[0]:
-        data_alms_Cf = [setup["filter_C"](
-        data_alms[args.est_maps[2]][split])
-                    for split in range(NSPLIT)]
-    else:
-        data_alms_Cf = data_alms_Af
-        
-    if args.est_maps[3]!=args.est_maps[0]:
-        data_alms_Cf = [setup["filter_D"](
-        data_alms[args.est_maps[3]][split])
-                    for split in range(NSPLIT)]
-    else:
-        data_alms_Df = data_alms_Af   
-
-    data_alms_f = [data_alms_Af,
-                   data_alms_Bf,
-                   data_alms_Cf,
-                   data_alms_Df]
-    """
-    #assert args.est_maps[2]==args.est_maps[0]
-    #assert args.est_maps[3]==args.est_maps[0]
-    #data_alms_Cf = data_alms_Af
-    #data_alms_Df = data_alms_Af
-
-    """
-    def run_ClKK(comm=None, do_lh=False, do_psh=False):
-        #K from Q(ilc, ilc-tszandcibd)
-        print("running K_AB")
-        Ks_ab = four_split_K(
-            setup["qfunc_K_AB"],
-            data_alms_Af[0], data_alms_Af[1],
-            data_alms_Af[2], data_alms_Af[3],
-            Xdatp_0=data_alms_Bf[0],
-            Xdatp_1=data_alms_Bf[1],
-            Xdatp_2=data_alms_Bf[2],
-            Xdatp_3=data_alms_Bf[3],
-            )
-        #save K^hat^X alm 
-        hp.write_alm(opj(args.output_dir, "K_ab_hatX.fits"), Ks_ab[0], overwrite=True)
-        #Actually save all the Ks - we'll need these for combining with mean-field
-        if rank==0:
-            with open(opj(args.output_dir, "K_ab.pkl"), "wb") as f:
-                pickle.dump(Ks_ab, f)
-
-        if do_lh:
-
-            Ks_ab_lh = four_split_K(
-                setup["qfunc_K_AB_lh"],
-                data_alms_Af[0], data_alms_Af[1],
-                data_alms_Af[2], data_alms_Af[3],
-                Xdatp_0=data_alms_Bf[0],
-                Xdatp_1=data_alms_Bf[1],
-                Xdatp_2=data_alms_Bf[2],
-                Xdatp_3=data_alms_Bf[3],
-                )
-            hp.write_alm(opj(args.output_dir, "K_ab_lh_hatX.fits"), Ks_ab_lh[0], overwrite=True)
-            #Actually save all the Ks - we'll need these for combining with mean-field
-            if rank==0:
-                with open(opj(args.output_dir, "K_ab_lh.pkl"), "wb") as f:
-                    pickle.dump(Ks_ab_lh, f)
-
-        if do_psh:
-            Ks_ab_psh = four_split_K(
-                setup["qfunc_K_AB_psh"],
-                data_alms_Af[0], data_alms_Af[1],
-                data_alms_Af[2], data_alms_Af[3],
-                Xdatp_0=data_alms_Bf[0],
-                Xdatp_1=data_alms_Bf[1],
-                Xdatp_2=data_alms_Bf[2],
-                Xdatp_3=data_alms_Bf[3],
-                )
-            hp.write_alm(opj(args.output_dir, "K_ab_psh_hatX.fits"), Ks_ab_lh[0], overwrite=True)
-            #Actually save all the Ks - we'll need these for combining with mean-field
-            if rank==0:
-                with open(opj(args.output_dir, "K_ab_psh.pkl"), "wb") as f:
-                    pickle.dump(Ks_ab_psh, f)
-
-        #K from Q(ilc,ilc)
-        print("running K_CD")
-        if (args.est_maps[0],args.est_maps[1]) == (args.est_maps[2],args.est_maps[3]):
-            Ks_cd = Ks_ab
-            if do_lh:
-                Ks_cd_lh = Ks_ab_lh
-            if do_psh:
-                Ks_cd_psh = Ks_ab_psh
-        else:
-            Ks_cd = four_split_K(
-                setup["qfunc_K_CD"],
-                data_alms_Af[0], data_alms_Af[1],
-                data_alms_Af[2], data_alms_Af[3],
-                )
-            #save K^hat^X alm 
-            hp.write_alm(opj(args.output_dir, "K_cd_hatX.fits"), Ks_cd[0], overwrite=True)
-            if do_lh:
-                Ks_cd_lh = four_split_K(
-                    setup["qfunc_K_CD_lh"],
-                    data_alms_Af[0], data_alms_Af[1],
-                    data_alms_Af[2], data_alms_Af[3],
-                    )
-                hp.write_alm(opj(args.output_dir, "K_cd_lh_hatX.fits"), Ks_cd_lh[0], overwrite=True)
-            if do_psh:
-                Ks_cd_psh = four_split_K(
-                    setup["qfunc_K_CD_psh"],
-                    data_alms_Af[0], data_alms_Af[1],
-                    data_alms_Af[2], data_alms_Af[3],
-                    )
-                hp.write_alm(opj(args.output_dir, "K_cd_psh_hatX.fits"), Ks_cd_psh[0], overwrite=True)
-
-        #Actually save all the Ks - we'll need these for combining with mean-field
-        if rank==0:
-            with open(opj(args.output_dir, "K_cd.pkl"), "wb") as f:
-                pickle.dump(Ks_cd, f)
-            if do_lh:
-                with open(opj(args.output_dir, "K_cd_lh.pkl"), "wb") as f:
-                    pickle.dump(Ks_cd_lh, f)
-            if do_psh:
-                with open(opj(args.output_dir, "K_cd_psh.pkl"), "wb") as f:
-                    pickle.dump(Ks_cd_psh, f)
-
-        print("getting CL_KK")
-        cl_abcd = split_phi_to_cl(Ks_ab, Ks_cd)/w4
-        #return raw auto, as well as Ks arrays - we need to save these for mean field
-        print("done")
-        ret_dict = {"cl_KK_raw": cl_abcd,
-                    "Ks_ab": Ks_ab,
-                    "Ks_cd": Ks_cd}
-        if do_lh:
-            cl_abcd_lh = split_phi_to_cl(Ks_ab_lh, Ks_cd_lh)/w4
-            ret_dict["cl_KK_lh_raw"] = cl_abcd_lh
-            ret_dict["Ks_ab_lh"] = Ks_ab_lh
-            ret_dict["Ks_cd_lh"] = Ks_cd_lh
-        if do_psh:
-            cl_abcd_psh = split_phi_to_cl(Ks_ab_psh, Ks_cd_psh)/w4
-            ret_dict["cl_KK_psh_raw"] = cl_abcd_psh
-            ret_dict["Ks_ab_psh"] = Ks_ab_psh
-            ret_dict["Ks_cd_psh"] = Ks_cd_psh
-
-        return ret_dict
-    """
 
     if args.do_auto:
         if rank==0:
             print("running auto")
-            """
-            #We probably also want to run on the kSZ theory here as the exact
-            #filters may affect slightly what we get
-            if args.ksz_theory_alm_file is not None:
-                ksz_theory_alm = utils.change_alm_lmax(
-                    hp.read_alm(args.ksz_theory_alm_file), args.mlmax)
-                cl_ksz_smooth = get_cl_smooth(ksz_theory_alm)
-                #I'm going to assume this is from a full-sky nside=4096 map, in which
-                #case, we need to re-run the setup
-                px_ksz = qe.pixelization(nside=4096)
-
-                
-
-                for key in ["cltot_A","cltot_B","cltot_C","cltot_D","cltot_AC","cltot_BD","cltot_AD","cltot_BC"]:
-                    assert np.all(np.isclose(setup[key], eval(key)))
-                
-                setup_ksz = setup_ABCD_recon(
-                    px_ksz, lmin, lmax, mlmax,
-                    cl_rksz[:mlmax+1],
-                    setup["cltot_A"], setup["cltot_B"], setup["cltot_C"], setup["cltot_D"],
-                    setup["cltot_AC"], setup["cltot_BD"], setup["cltot_AD"], setup["cltot_BC"],
-                    do_lh=True, do_psh=True)                
-                
-                ksz_theory_alms_f = [
-                    f(ksz_theory_alm) for f in [
-                        setup_ksz["filter_A"], setup_ksz["filter_B"], setup_ksz["filter_C"], setup_ksz["filter_D"]]
-                    ]
-
-                K_ksz_AB = setup_ksz["qfunc_K_AB"](ksz_theory_alms_f[0],
-                                               ksz_theory_alms_f[1])
-                K_ksz_CD = setup_ksz["qfunc_K_CD"](ksz_theory_alms_f[2],
-                                               ksz_theory_alms_f[3])
-                Cl_KK_ksz_raw = curvedsky.alm2cl(K_ksz_AB, K_ksz_CD)
-                ksz_N0 = setup_ksz["get_fg_trispectrum_N0_ABCD"](cl_ksz_smooth, cl_ksz_smooth, cl_ksz_smooth, cl_ksz_smooth)
-                outputs["Cl_KK_ksz_theory_raw"] = Cl_KK_ksz_raw
-                outputs["N0_ksz_theory"] = ksz_N0
-                outputs["Cl_KK_ksz_theory"] = Cl_KK_ksz_raw-ksz_N0
-
-                if args.do_lh:
-                    K_ksz_AB = setup_ksz["qfunc_K_AB_lh"](ksz_theory_alms_f[0],
-                                                   ksz_theory_alms_f[1])
-                    K_ksz_CD = setup_ksz["qfunc_K_CD_lh"](ksz_theory_alms_f[2],
-                                                   ksz_theory_alms_f[3])
-                    Cl_KK_ksz_lh_raw = curvedsky.alm2cl(K_ksz_AB, K_ksz_CD)
-                    ksz_N0_lh = setup_ksz["get_fg_trispectrum_N0_ABCD_lh"](cl_ksz_smooth, cl_ksz_smooth, cl_ksz_smooth, cl_ksz_smooth)
-                    outputs["Cl_KK_ksz_theory_raw_lh"] = Cl_KK_ksz_lh_raw
-                    outputs["N0_ksz_theory_lh"] = ksz_N0_lh
-                    outputs["Cl_KK_ksz_theory_lh"] = Cl_KK_ksz_lh_raw - ksz_N0_lh
-
-                if args.do_psh:
-                    K_ksz_AB = setup_ksz["qfunc_K_AB_psh"](ksz_theory_alms_f[0],
-                                                   ksz_theory_alms_f[1])
-                    K_ksz_CD = setup_ksz["qfunc_K_CD_psh"](ksz_theory_alms_f[2],
-                                                   ksz_theory_alms_f[3])
-                    Cl_KK_ksz_psh_raw = curvedsky.alm2cl(K_ksz_AB, K_ksz_CD)
-                    ksz_N0_psh = setup_ksz["get_fg_trispectrum_N0_ABCD_psh"](cl_ksz_smooth, cl_ksz_smooth, cl_ksz_smooth, cl_ksz_smooth)
-                    outputs["Cl_KK_ksz_theory_raw_psh"] = Cl_KK_ksz_psh_raw
-                    outputs["N0_ksz_theory_psh"] = ksz_N0_psh
-                    outputs["Cl_KK_ksz_theory_psh"] = Cl_KK_ksz_psh_raw - ksz_N0_psh
-            """
 
         #Now run on data
         if args.ksz_theory_alm_file is not None:
@@ -1248,9 +899,6 @@ def main():
 
         outputs = run_ClKK(args, setup, data_alms_f, comm=comm, verbose=(rank==0), do_lh=args.do_lh, do_psh=args.do_psh,
                                 ksz_theory_alm=ksz_theory_alm, no_cross=args.no_cross)
-        #outputs["cl_KK_raw"] = auto_outputs["cl_abcd"]
-        #outputs["cl_KK_lh_raw"] = auto_outputs["cl_abcd_lh"]
-        #outputs["cl_KK_lh_raw"] = auto_outputs["cl_abcd_psh"]
         outputs["N0"] = setup["N0_ABCD_K"]
         if args.do_lh:
             outputs["N0_lh"] = setup["N0_ABCD_K_lh"]
@@ -1259,12 +907,6 @@ def main():
         outputs["N0_nonoise"] = setup["N0_K_nonoise"]
         outputs["norm_K_AB"] = setup["norm_K_AB"]
         outputs["norm_K_CD"] = setup["norm_K_CD"]
-        #outputs["Ks_ab"] = auto_outputs["Ks_ab"]
-        #outputs["Ks_ab_lh"] = auto_outputs["Ks_ab_lh"]
-        #outputs["Ks_ab_psh"] = auto_outputs["Ks_ab_psh"]
-        #outputs["Ks_cd"] = auto_outputs["Ks_cd"]
-        #outputs["Ks_cd_lh"] = auto_outputs["Ks_cd_lh"]
-        #outputs["Ks_cd_psh"] = auto_outputs["Ks_cd_psh"]
         outputs["cl_rksz"] = setup["cl_rksz"] #save what we used for filters
         outputs["cltot_A"] = setup["cltot_A"]
         outputs["cltot_B"] = setup["cltot_B"]
@@ -1280,8 +922,6 @@ def main():
 
         for leg in ["A","B","C","D"]:
             outputs["total_filter_%s"%leg] = setup["profile"] / setup["cltot_%s"%leg]
-        #for leg,cltot in zip(["A","B","C","D"], [cltot_A,cltot_B,cltot_C,cltot_D]):
-        #    outputs["total_filter_%s"%leg] = profile / cltot
 
         outputs["lmin"] = setup["lmin"]
         outputs["lmax"] = setup["lmax"]
@@ -1299,7 +939,7 @@ def main():
                       Ks_ab=None, Ks_cd=None, 
                       Ks_ab_lh=None, Ks_cd_lh=None,
                       fg_power_data=None, meanfield_tag=None,
-                      no_cross=False
+                      no_cross=False, get_sim_func=None,
                       ):
 
         mlmax = setup["mlmax"]
@@ -1321,64 +961,33 @@ def main():
         mlmax=setup["mlmax"]
             
         safe_mkdir(mean_field_outdir)
-        
-        if args.get_sims_from_data_cls:
-            raise ValueError("don't use this method")
-            def get_sim_alms_A(i):
-                print("getting sims A %d"%i)
-                signal_seed = (args.seed*(i+1)*nsim)
-                noise_seed = signal_seed+1
-                print("signal seed:", signal_seed)
-                print("noise seed:", noise_seed)
-                #all_alms,_,_ = get_sims_from_cls(
-                #    data_cl_signal_dict, data_cl_noise_dict,
-                #    signal_seed, noise_seed, mlmax=mlmax,
-                #    w1=w1)
-                all_alms,_,_ = get_sims_from_cls(
-                    cl_split_auto_dict, cl_split_cross_dict, total_mask,
-                    signal_seed, noise_seed, mlmax=args.mask_sim_lmax,
-                    w1=w1, lmax_out=mlmax)
-                
-                alms=all_alms[args.est_maps[0]]
-                print("len(alms)",len(alms))
-                alms_f = [setup["filter_A"](alm) for alm in alms]
-                return alms_f
 
-            def get_sim_alms_B(i):
-                signal_seed = (args.seed*(i+1)*nsim)
-                noise_seed = signal_seed+1
-                all_alms,_,_ = get_sims_from_cls(
-                    cl_split_auto_dict, cl_split_cross_dict, total_mask,
-                    signal_seed, noise_seed, mlmax=args.mask_sim_lmax,
-                    w1=w1, lmax_out=mlmax)
-                alms=all_alms[args.est_maps[1]]
-                alms_f = [setup["filter_B"](alm) for alm in alms]
-                return alms_f
-            
-        else:
-        
-            def get_sim_alms_A(i):
-                #alms = get_sim_alm_dr6_hilc(
-                #    args.est_maps[0], (200+i,0,i+1),
-                #    data_dir=DATA_DIR, mlmax=mlmax)
-                print("getting sim from template path:", args.sim_template_path)
-                alms = get_sim_alm_dr6_hilc(
-                    args.est_maps[0], (200+i,0,i+1),
-                    args.sim_template_path,
-                    mlmax=setup["mlmax"], apply_extra_mask=setup["extra_mask"])
-                alms_f = [setup["filter_A"](alm) for alm in alms]
-                return alms_f
+        #function to get sims
+        get_sim_func = eval(args.get_sim_func)
+        def get_sim_alms_A(i):
+            #alms = get_sim_alm_dr6_hilc(
+            #    args.est_maps[0], (200+i,0,i+1),
+            #    data_dir=DATA_DIR, mlmax=mlmax)
+            print("getting sim from template path:", args.sim_template_path)
+            alms = get_sim_func(
+                args.est_maps[0], i,
+                args.sim_template_path,
+                mlmax=setup["mlmax"], apply_extra_mask=setup["extra_mask"],
+                no_cross=no_cross)
+            alms_f = [setup["filter_A"](alm) for alm in alms]
+            return alms_f
 
-            def get_sim_alms_B(i):
-                #alms = get_sim_alm_dr6_hilc(
-                #    args.est_maps[1], (200+i,0,i+1),
-                #    data_dir=DATA_DIR, mlmax=mlmax)
-                alms = get_sim_alm_dr6_hilc(
-                    args.est_maps[1], (200+i,0,i+1),
-                    args.sim_template_path,
-                    mlmax=setup["mlmax"], apply_extra_mask=setup["extra_mask"])
-                alms_f = [setup["filter_B"](alm) for alm in alms]
-                return alms_f
+        def get_sim_alms_B(i):
+            #alms = get_sim_alm_dr6_hilc(
+            #    args.est_maps[1], (200+i,0,i+1),
+            #    data_dir=DATA_DIR, mlmax=mlmax)
+            alms = get_sim_func(
+                args.est_maps[1], i,
+                args.sim_template_path,
+                mlmax=setup["mlmax"], apply_extra_mask=setup["extra_mask"],
+                no_cross=no_cross)
+            alms_f = [setup["filter_B"](alm) for alm in alms]
+            return alms_f
 
         Ks_ab_list = []
         Ks_cd_list = []
@@ -1609,64 +1218,30 @@ def main():
         mlmax=setup["mlmax"]
         w1,w2,w4 = setup["w1"],setup["w2"],setup["w4"]
         
-        if args.get_sims_from_data_cls:
-            
-            def get_sim_alms_A(i):
-                print("getting sims A %d"%i)
-                signal_seed = (args.seed*(i+1)*nsim)
-                noise_seed = signal_seed+1
-                print("signal seed:", signal_seed)
-                print("noise seed:", noise_seed)
-                #all_alms,_,_ = get_sims_from_cls(
-                #    data_cl_signal_dict, data_cl_noise_dict,
-                #    signal_seed, noise_seed, mlmax=mlmax,
-                #    w1=w1)
-                all_alms,_,_ = get_sims_from_cls(
-                    cl_split_auto_dict, cl_split_cross_dict, mask,
-                    signal_seed, noise_seed, mlmax=args.mask_sim_lmax,
-                    w1=w1, lmax_out=mlmax)
-                
-                alms=all_alms[args.est_maps[0]]
-                print("len(alms)",len(alms))
-                alms_f = [setup["filter_A"](alm) for alm in alms]
-                return alms_f
+        #get sim alm functions
+        get_sim_func  = eval(args.get_sim_func)
+        def get_sim_alms_A(i):
+            #alms = get_sim_alm_dr6_hilc(
+            #    args.est_maps[0], (200+i,0,i+1),
+            #    data_dir=DATA_DIR, mlmax=mlmax)
+            print("getting sim from template path:", args.sim_template_path)
+            alms = get_sim_func(
+                args.est_maps[0], i,
+                args.sim_template_path,
+                mlmax=mlmax, apply_extra_mask=setup["extra_mask"])
+            alms_f = [setup["filter_A"](alm) for alm in alms]
+            return alms_f
 
-            def get_sim_alms_B(i):
-                signal_seed = (args.seed*(i+1)*nsim)
-                noise_seed = signal_seed+1
-                all_alms,_,_ = get_sims_from_cls(
-                    cl_split_auto_dict, cl_split_cross_dict, mask,
-                    signal_seed, noise_seed, mlmax=args.mask_sim_lmax,
-                    w1=w1, lmax_out=mlmax)
-
-                alms=all_alms[args.est_maps[1]]
-                alms_f = [setup["filter_B"](alm) for alm in alms]
-                return alms_f
-
-        else:
-            #get sim alm functions
-            def get_sim_alms_A(i):
-                #alms = get_sim_alm_dr6_hilc(
-                #    args.est_maps[0], (200+i,0,i+1),
-                #    data_dir=DATA_DIR, mlmax=mlmax)
-                print("getting sim from template path:", args.sim_template_path)
-                alms = get_sim_alm_dr6_hilc(
-                    args.est_maps[0], (200+i,0,i+1),
-                    args.sim_template_path,
-                    mlmax=mlmax, apply_extra_mask=setup["extra_mask"])
-                alms_f = [setup["filter_A"](alm) for alm in alms]
-                return alms_f
-
-            def get_sim_alms_B(i):
-                #alms = get_sim_alm_dr6_hilc(
-                #    args.est_maps[1], (200+i,0,i+1),
-                #    data_dir=DATA_DIR, mlmax=mlmax)
-                alms = get_sim_alm_dr6_hilc(
-                    args.est_maps[1], (200+i,0,i+1),
-                    args.sim_template_path,
-                    mlmax=mlmax, apply_extra_mask=setup["extra_mask"])
-                alms_f = [setup["filter_B"](alm) for alm in alms]
-                return alms_f
+        def get_sim_alms_B(i):
+            #alms = get_sim_alm_dr6_hilc(
+            #    args.est_maps[1], (200+i,0,i+1),
+            #    data_dir=DATA_DIR, mlmax=mlmax)
+            alms = get_sim_func(
+                args.est_maps[1], i,
+                args.sim_template_path,
+                mlmax=mlmax, apply_extra_mask=setup["extra_mask"])
+            alms_f = [setup["filter_B"](alm) for alm in alms]
+            return alms_f
 
         if args.est_maps[2]==args.est_maps[0]:
             get_sim_alms_C = None
@@ -1878,85 +1453,6 @@ def main():
             if rank==0:
                 print("not doing n1 for qe")
             pass
-
-            
-        """
-        outputs["theory_N0"] = setup["N0_ABCD_K"]
-        outputs["theory_N0_lh"] = setup["N0_ABCD_K_lh"]
-        #save pkl
-
-        output_file = "rdn0_outputs_nsim%d.pkl"%args.nsim_rdn0
-        rdn0_file = opj(args.output_dir, "rdn0_outputs.pkl")
-        print("saving rdn0 outputs to %s"%rdn0_file)
-        with open(rdn0_file, 'wb') as f:
-            pickle.dump(outputs, f)
-    
-    #run rdn0
-
-    rdn0, mcn0 = run_rdn0(setup, nsim_rdn0, use_mpi=use_mpi)
-    outputs = {}
-    outputs["rdn0"] = rdn0
-    outputs["mcn0"] = mcn0
-    outputs["theory_N0"] = iici_setup["N0_ABCD_K"]
-    outputs["theory_N0_lh"] = iici_setup["N0_ABCD_K_lh"]
-    return outputs
-            
-            
-    def run_rdn0(nsim):
-        #get sim alm functions
-        def get_sim_alms_A(i):
-            alms = get_sim_alm_dr6_hilc(
-                args.est_maps[0], (200+i,0,i+1),
-                data_dir=DATA_DIR, mlmax=mlmax)
-            alms_f = [iici_setup["filter_A"](alm) for alm in alms]
-            return alms_f
-        
-        def get_sim_alms_B(i):
-            alms = get_sim_alm_dr6_hilc(
-                args.est_maps[1], (200+i,0,i+1),
-                data_dir=DATA_DIR, mlmax=mlmax)
-            alms_f = [iici_setup["filter_B"](alm) for alm in alms]
-            return alms_f
-
-        if args.est_maps[2]==args.est_maps[0]:
-            get_sim_alms_C = None
-        else:
-            raise NotImplementedError("")
-        if args.est_maps[3]==args.est_maps[0]:
-            get_sim_alms_D = None
-        else:
-            raise NotImplementedError("")
-
-
-        rdn0,mcn0 = mcrdn0_s4(args.nsim_rdn0, split_phi_to_cl,
-                              iici_setup["qfunc_K_AB"],
-                              four_split_K,
-                              get_sim_alms_A, data_alms_Af,
-                              get_sim_alms_B = get_sim_alms_B,
-                              data_split_alms_B = data_alms_Bf,
-                              qfunc_CD=iici_setup["qfunc_K_CD"],
-                              use_mpi=args.use_mpi)
-
-        rdn0 /= w4
-        mcn0 /= w4
-
-        return rdn0, mcn0
-
-    if args.do_rdn0:
-        rdn0, mcn0 = run_rdn0(args.nsim_rdn0)
-        outputs = {}
-        outputs["rdn0"] = rdn0
-        outputs["mcn0"] = mcn0
-        outputs["theory_N0"] = iici_setup["N0_ABCD_K"]
-        outputs["theory_N0_lh"] = iici_setup["N0_ABCD_K_lh"]
-        #save pkl
-        rdn0_file = opj(args.output_dir, "rdn0_outputs.pkl")
-        print("saving rdn0 outputs to %s"%rdn0_file)
-        with open(rdn0_file, 'wb') as f:
-            pickle.dump(outputs, f)
-    """
-
-
     
 
 if __name__=="__main__":
