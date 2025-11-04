@@ -25,12 +25,14 @@ config="cldata_smooth-301-2_v4_lmax6000_60skmask_31102025"
 srun -u -l -n 16 python sims/generate_gaussian_sims.py ${outdir}/ilc_${config}/gaussian_sims --data_template_path ${outdir}/ilc_${config}/\${freq}_split\${split}.fits --freqs hilc hilc-tsza
 ndcibd hilc-tszd  --mpi --nsim 200 --mask_file ${outdir}/ilc_${config}/mask.fits --lmax 6000
 ```
-This outputs Gaussian signal-only simulations. At the time, we had not saved noise-only simulations (only noise+CMB), so the script `sims/replace_signal.py` goes through subtracting the CMB signal, and replacing it with the Gaussian signal generated above. A bit mad, I know:
+This outputs Gaussian signal-only simulations. At the time, we had not saved noise-only simulations (only noise+CMB), so the script `sims/replace_signal.py` goes through subtracting the CMB signal, and replacing it with the Gaussian signal generated above. So we could simplify this a bit with access to the noise-only sims. Or write our own script to generate the sims. 
 ```
 `srun -n 16 python replace_signal.py`
 ```
 This outputs simulations in `/pscratch/sd/m/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v4_lmax6000_60skmask_31102025/data_signal_sims/`.
 These are the simulations used for RDN0 and mean-field calculations. 
+
+The plot below shows the improved signal-only agreement (as seen from the cross-based power spectrum) between data and sims ("tuned sim" means teh one with Gaussian signal matched to the data). 
 
 2. We're not quite done yet unfortunately. For transfer function (aka MC bias) and covariance calculations, we used a different set of simulations where we add kSZ signal to the noisy simulations output by `run_ilc.py`. This kSZ signal is the Alvarez 2016 kSZ signal, randomly rotated for each simulation realisation. These are generated via the script `sim_e2e_test/add_ksz_signal_ilc.sh`.
 
