@@ -39,12 +39,11 @@ These are the simulations used for RDN0 and mean-field calculations.
 The plot below shows the improved signal-only agreement (as seen from the cross-based power spectrum) between data and sims ("tuned sim" means teh one with Gaussian signal matched to the data). 
 ![alt text](https://github.com/NiallMac/ksz2/blob/main/plots/include/cl_data_vs_sim.png)
 
-
 2. We're not quite done yet unfortunately. For transfer function (aka MC bias) and covariance calculations, we used a different set of simulations where we add kSZ signal to the noisy simulations output by `run_ilc.py`. This kSZ signal is the Alvarez 2016 kSZ signal, randomly rotated for each simulation realisation. These are generated via the script `sim_e2e_test/add_ksz_signal_ilc.sh`.
 
 # Running the pipeline
 
-1. Run the measurement with bias corrections
-
-2. Run the "end-to-end" simulations
+We use a couple of scripts:
+1. `scripts/run_auto.sh` runs the measurement and bias corrections. 
+2. `sim_e2e_test/run_e2e_sim.sh` runs the "end-to-end" simulations used for the transfer function correction and covariance matrix. 
 `sim_e2e_test/run_e2e_sim.sh`
