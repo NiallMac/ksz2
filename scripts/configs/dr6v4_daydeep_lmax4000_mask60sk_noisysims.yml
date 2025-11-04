@@ -1,0 +1,16 @@
+data_template_path: "/pscratch/sd/m/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v4_lmax6000_60skmask/${freq}_split${split}.fits"
+#sim_template_path: "/pscratch/sd/m/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v4_lmax6000_60skmask/gaussian_sims/${freq}_isim${actseed}.fits"
+sim_template_path: "/pscratch/sd/m/maccrann/cmb/act_dr6plus/sims/kcoadds/act_dr6v4_day_tile_cmbmask_dd_cut_daydeep_${freq}_lmax5400_4way_set${split}_noise_sim_alm${actseed}.fits
+mask: /global/cfs/projectdirs/act/data/maccrann/mask_xlink0.001_dr6v4_pa5pa6_dd_cut_apo3deg.fits
+no_cross: True
+K_lmin: 3000
+mlmax: 4000
+K_lmax: 4000
+do_auto: True
+do_rdn0: False
+nsim_rdn0: 48
+get_sims_from_cls: False
+do_lh: False
+do_psh: False
+nsim_meanfield: 48
+ksz_theory_alm_file: "../tests/alms_4e3_2048_50_50_ksz.fits"

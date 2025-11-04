@@ -1,0 +1,17 @@
+data_template_path: "/pscratch/sd/m/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v4_lmax6000_60skmask/${freq}_split${split}.fits"
+#sim_template_path: "/pscratch/sd/m/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v4_lmax6000_60skmask/gaussian_sims/${freq}_isim${actseed}.fits"
+sim_template_path: "/pscratch/sd/m/maccrann/cmb/act_dr6/ilc_cldata_smooth-301-2_v4_lmax6000_60skmask/data_signal_sims/sim_planck${planckseed}_act00_${actseed}/${freq}_split${split}.fits"
+mask: /global/cfs/projectdirs/act/data/maccrann/dr6/act_mask_20220316_GAL060_rms_60.00sk.fits
+K_lmin: 3000
+mlmax: 4000
+K_lmax: 4000
+do_auto: True
+do_rdn0: False
+nsim_rdn0: 64
+get_sims_from_cls: False
+do_lh: False
+do_psh: False
+nsim_meanfield: 64
+ksz_theory_alm_file: "../tests/alms_4e3_2048_50_50_ksz.fits"
+apply_extra_mask: /global/cfs/projectdirs/act/data/maccrann/dr6/map_coadd_20240322_act_s17_s22_f150_daynight_ivar.fits,0
+extra_mask_power: 2
