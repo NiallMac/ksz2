@@ -1,6 +1,10 @@
-# ksz2
+# Code for the DR6 kSZ trispectrum measurement pipeline
 
-How to run the DR6 pipeline
+This repository contains the pipeline code for generating the kSZ trispectrum measurements presented in [MacCrann et al. 2024](https://arxiv.org/abs/2405.01188).
+
+The scripts in this repository use a library code which is confusingly called [ksz4](https://github.com/simonsobs/ksz4/tree/main), so start by installing that.
+
+The rest of the complexity in the pipeline mainly comes down to pre-processing the DR6 data (in our case we use a harmonic-space ILC), and running bias corrections using simulations (which also need to be pre-processed/generated). 
 
 # Generate ILC alms
 
